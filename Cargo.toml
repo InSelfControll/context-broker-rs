@@ -1,0 +1,31 @@
+[package]
+name = "context-broker"
+version = "0.1.0"
+edition = "2024"
+description = "Token-lean semantic code search and project memory MCP server"
+license = "MIT"
+authors = ["Ofir (InSelfControll)"]
+repository = "https://github.com/InSelfControll/context-broker-rs"
+readme = "README.md"
+keywords = ["mcp", "semantic-search", "code-search", "embeddings", "llm"]
+categories = ["command-line-utilities", "development-tools", "text-processing"]
+
+[dependencies]
+candle-core = "0.11.1"
+candle-nn = "0.11.1"
+candle-transformers = "0.11.1"
+globset = "0.4.21"
+ignore = "0.4.34"
+libc = "0.2.191"
+regex = "1.13.2"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
+ureq = "3.5.2"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "abort"
