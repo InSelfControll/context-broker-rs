@@ -83,7 +83,7 @@ sudo install -m 755 context-broker /usr/local/bin/context-broker
 
 Use `aarch64-unknown-linux-musl` in the file name on ARM. A `.sha256` file is published next to each archive.
 
-**Option 2: build from source.** Needs Rust 1.92 or newer.
+**Option 2: build from source.** Needs a recent stable Rust (developed on 1.100; the 1.92 shipped by some distributions is too old for a dependency, so use the prebuilt binary there).
 
 ```bash
 git clone https://github.com/InSelfControll/context-broker-rs.git
