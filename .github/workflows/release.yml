@@ -1,0 +1,85 @@
+name: Static binaries
+
+# Builds fully static (musl) Linux binaries that run on any distribution.
+# - Run manually from the Actions tab to get the binaries as workflow artifacts.
+# - Push a tag like v0.1.0 to also publish them on a GitHub release.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      - name: Check the binary is static
+        run: |
+          file "target/$TARGET/release/context-broker" | tee /dev/stderr | grep -Eq "static(ally|-pie) linked"
+
+      - name: End-to-end test
+        run: cargo test --release --locked --target "$TARGET"
+
+      - name: Run in a container with no C library
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            | docker run --rm -i -v "$PWD/target/$TARGET/release:/app:ro" busybox:uclibc /app/context-broker \
+            | tee /dev/stderr | grep -q '"name":"context-broker"'
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C "target/$TARGET/release" -czf "dist/context-broker-$TARGET.tar.gz" context-broker
+          cd dist && sha256sum "context-broker-$TARGET.tar.gz" > "context-broker-$TARGET.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: context-broker-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

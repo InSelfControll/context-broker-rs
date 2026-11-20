@@ -74,7 +74,16 @@ Only files whose modification time or size changed are re-embedded. The index li
 
 ## 🚀 Quick Start
 
-**Prerequisites:** a Rust toolchain recent enough for the 2024 edition.
+**Option 1: prebuilt static binary (Linux, no dependencies).** Each [release](https://github.com/InSelfControll/context-broker-rs/releases) carries a fully static (musl) binary for `x86_64` and `aarch64` that runs on any Linux distribution, with no libc or other library required:
+
+```bash
+curl -L https://github.com/InSelfControll/context-broker-rs/releases/latest/download/context-broker-x86_64-unknown-linux-musl.tar.gz | tar xz
+sudo install -m 755 context-broker /usr/local/bin/context-broker
+```
+
+Use `aarch64-unknown-linux-musl` in the file name on ARM. A `.sha256` file is published next to each archive.
+
+**Option 2: build from source.** Needs Rust 1.92 or newer.
 
 ```bash
 git clone https://github.com/InSelfControll/context-broker-rs.git
@@ -82,7 +91,7 @@ cd context-broker-rs
 cargo build --release
 ```
 
-The binary is `target/release/context-broker`. It reads one JSON-RPC message per line on stdin and answers on stdout, so there is nothing to start by hand; your MCP client launches it. The command is just the binary path, with no arguments.
+The binary is `target/release/context-broker` (or wherever you installed the prebuilt one). It reads one JSON-RPC message per line on stdin and answers on stdout, so there is nothing to start by hand; your MCP client launches it. The command is just the binary path, with no arguments.
 
 **Claude Code**
 
@@ -281,6 +290,8 @@ cargo test --release
 ```
 
 One end-to-end test drives the real binary over MCP stdio through every tool, the secret and ignore policies, incremental indexing and persistence across a restart. It needs the embedding model (found in the Hugging Face cache, or downloaded once).
+
+Static binaries are built by the `Static binaries` GitHub Actions workflow (`.github/workflows/release.yml`): run it manually for artifacts, or push a `v*` tag to publish a release. To build one yourself: `rustup target add x86_64-unknown-linux-musl`, install a musl C compiler (`musl-tools` on Debian/Ubuntu), then `cargo build --release --target x86_64-unknown-linux-musl`.
 
 To rebuild the demo GIF: `uv run --with pillow python docs/assets/make_gif.py`.
 
