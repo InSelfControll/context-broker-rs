@@ -11,9 +11,9 @@ keywords = ["mcp", "semantic-search", "code-search", "embeddings", "llm"]
 categories = ["command-line-utilities", "development-tools", "text-processing"]
 
 [dependencies]
-candle-core = "0.11.1"
-candle-nn = "0.11.1"
-candle-transformers = "0.11.1"
+candle-core = "=0.10.2"
+candle-nn = "=0.10.2"
+candle-transformers = "=0.10.2"
 globset = "0.4.21"
 ignore = "0.4.34"
 libc = "0.2.191"
