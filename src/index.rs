@@ -238,6 +238,11 @@ pub fn trim_memory() {
     unsafe {
         libc::malloc_trim(0);
     }
+    #[cfg(target_env = "musl")]
+    // SAFETY: mi_collect only returns unused allocator memory to the OS.
+    unsafe {
+        libmimalloc_sys::mi_collect(true);
+    }
 }
 
 /// Plain text: root stated once, relative paths, no JSON escaping of code.

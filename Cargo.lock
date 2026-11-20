@@ -242,6 +242,7 @@ dependencies = [
  "globset",
  "ignore",
  "libc",
+ "libmimalloc-sys",
  "mimalloc",
  "regex",
  "serde_json",
