@@ -304,12 +304,18 @@ fn respond(app: &Mutex<App>, line: &str) -> Option<Value> {
 fn serve_http(app: &Mutex<App>, address: &str) -> Result<(), String> {
     let root = project::lock_root()?;
     let _ = REMOTE.set(());
+    let allowed = config::http_allowed_networks()?;
     let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
-    eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}", root.display());
+    eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
     let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
     for mut request in server.incoming_requests() {
         let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
-        let response = if request.url().split('?').next() != Some("/mcp") {
+        // Behind a Cloudflare tunnel the caller's address arrives in CF-Connecting-IP, set by
+        // Cloudflare itself. With an allow-list, a request without a listed address is refused.
+        let caller = request.headers().iter().find(|header| header.field.equiv("CF-Connecting-IP")).and_then(|header| header.value.as_str().trim().parse().ok());
+        let response = if !allowed.is_empty() && !caller.is_some_and(|ip| allowed.iter().any(|network| config::network_contains(network, ip))) {
+            plain(403, "address not allowed")
+        } else if request.url().split('?').next() != Some("/mcp") {
             plain(404, "not found")
         } else if *request.method() != tiny_http::Method::Post {
             plain(405, "use POST").with_header(tiny_http::Header::from_bytes("Allow", "POST").expect("valid header"))

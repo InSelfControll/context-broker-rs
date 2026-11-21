@@ -120,6 +120,38 @@ pub fn graphify_detected(root: &Path) -> bool {
                 .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("graphify").is_file() || dir.join("graphify.exe").is_file()))
         })
 }
+/// A network as `(address, prefix length)`.
+pub type Network = (std::net::IpAddr, u8);
+
+/// `CONTEXT_BROKER_HTTP_ALLOW_IPS`: addresses or CIDR ranges (comma separated) that may use the
+/// HTTP transport. Empty means no restriction by address.
+pub fn http_allowed_networks() -> Result<Vec<Network>, String> {
+    env_text("CONTEXT_BROKER_HTTP_ALLOW_IPS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let (address, prefix) = entry.split_once('/').unwrap_or((entry, ""));
+            let address: std::net::IpAddr = address.parse().map_err(|_| format!("CONTEXT_BROKER_HTTP_ALLOW_IPS: bad address '{entry}'"))?;
+            let widest = if address.is_ipv4() { 32 } else { 128 };
+            let prefix = if prefix.is_empty() { widest } else { prefix.parse::<u8>().ok().filter(|bits| *bits <= widest).ok_or_else(|| format!("CONTEXT_BROKER_HTTP_ALLOW_IPS: bad prefix in '{entry}'"))? };
+            Ok((address, prefix))
+        })
+        .collect()
+}
+
+/// True when `client` lies inside `network` (same address family, same leading `prefix` bits).
+pub fn network_contains(network: &Network, client: std::net::IpAddr) -> bool {
+    use std::net::IpAddr::{V4, V6};
+    let same_prefix = |a: u128, b: u128, width: u32, prefix: u8| prefix == 0 || (a ^ b) >> (width - u32::from(prefix)) == 0;
+    match (network.0, client) {
+        (V4(net), V4(ip)) => same_prefix(u32::from(net).into(), u32::from(ip).into(), 32, network.1),
+        (V6(net), V6(ip)) => same_prefix(u128::from(net), u128::from(ip), 128, network.1),
+        _ => false,
+    }
+}
+
 fn env_text(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
