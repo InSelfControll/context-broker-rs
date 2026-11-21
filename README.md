@@ -357,6 +357,7 @@ Honcho and Redis backends, the web dashboard, task delegation to worker models, 
 |----------|---------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Module map, request flow, indexing pipeline, security layers, storage layout, threading |
 | [docs/TOOLS.md](docs/TOOLS.md) | Index of the tools |
+| [obsidian-plugin/](obsidian-plugin/README.md) | Obsidian plugin (desktop and Android) that keeps a vault in sync with a broker running in HTTP mode |
 | [docs/REMOTE.md](docs/REMOTE.md) | Serving a vault or project to the Claude and ChatGPT apps: HTTP mode, who gets in, Cloudflare Tunnel and Access step by step, sync |
 | [docs/tools/](docs/tools/) | One page per tool with parameters and an example reply |
 | [docs/assets/make_gif.py](docs/assets/make_gif.py) | Generator for the demo GIF |

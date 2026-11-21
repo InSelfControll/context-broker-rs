@@ -1,0 +1,9 @@
+{
+  "id": "context-broker-sync",
+  "name": "Context Broker Sync",
+  "version": "0.1.0",
+  "minAppVersion": "1.6.6",
+  "description": "Keeps this vault in sync with a Context Broker server over HTTPS.",
+  "author": "Ofir (InSelfControll)",
+  "isDesktopOnly": false
+}

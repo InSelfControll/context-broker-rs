@@ -1,0 +1,18 @@
+{
+  "name": "context-broker-sync",
+  "version": "0.1.0",
+  "description": "Obsidian plugin that keeps a vault in sync with a Context Broker server.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "bun build src/main.ts --outfile main.js --format cjs --target browser --external obsidian --external electron --minify-syntax --minify-whitespace",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.4.5",
+    "obsidian": "1.14.4",
+    "typescript": "7.0.2"
+  }
+}
