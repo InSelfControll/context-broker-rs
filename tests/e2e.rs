@@ -579,11 +579,13 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
     drop(server.stdin.take());
 
     // An allow-list of caller addresses (as reported by the proxy in front) refuses everyone else.
-    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", root),
+    let second = format!("127.0.0.1:{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+    let both = format!("{address}, {second}");
+    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&both)), ("CONTEXT_BROKER_PROJECT_ROOT", root),
         ("CONTEXT_BROKER_HTTP_ALLOW_IPS", Path::new("203.0.113.0/24, 2001:db8:aa00::/40,198.51.100.7"))]);
-    let status_for = |caller: &str| -> u16 {
+    let status_at = |address: &str, caller: &str| -> u16 {
         let mut stream = (0..100)
-            .find_map(|_| std::net::TcpStream::connect(&address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
+            .find_map(|_| std::net::TcpStream::connect(address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
             .expect("server is listening");
         let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
         let header = if caller.is_empty() { String::new() } else { format!("CF-Connecting-IP: {caller}\r\n") };
@@ -593,8 +595,10 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
         reply.split_whitespace().nth(1).unwrap().parse().unwrap()
     };
     for (caller, expected) in [("203.0.113.9", 200), ("198.51.100.7", 200), ("2001:db8:aaff::1", 200), ("", 403), ("203.0.114.9", 403), ("198.51.100.8", 403), ("2001:db8:ab00::1", 403), ("not-an-address", 403)] {
-        assert_eq!(status_for(caller), expected, "caller {caller:?}");
+        assert_eq!(status_at(&address, caller), expected, "caller {caller:?}");
     }
+    // Every listen address serves, with the same rules.
+    assert_eq!((status_at(&second, "203.0.113.9"), status_at(&second, "")), (200, 403));
     server.child.kill().unwrap();
     server.child.wait().unwrap();
     drop(server.stdin.take());

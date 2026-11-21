@@ -286,7 +286,8 @@ context-broker-rs
 - **Confined to one folder.** `CONTEXT_BROKER_PROJECT_ROOT` is required, and a `project_root` argument outside it is refused, so a remote caller cannot point the server at other folders.
 - **`read_file`.** Remote clients cannot open files themselves, so this mode adds a tool that returns numbered lines of a file inside the project, through the same secret filter as search.
 - **Keeping a remote copy of the vault in step.** `scripts/vault-sync.sh` is a small two-way sync through a git remote: run `vault-sync.sh init <vault> <remote-url>` once on each machine, then `vault-sync.sh <vault>` from a timer. Notes merge line by line and keep both sides' lines; every change stays in the git history.
-- **Allowed addresses.** `CONTEXT_BROKER_HTTP_ALLOW_IPS` (addresses or CIDR ranges, comma separated) refuses every caller whose address, as reported by Cloudflare in `CF-Connecting-IP`, is not listed. Use it only behind a Cloudflare tunnel, where that header cannot be forged.
+- **Allowed addresses.** `CONTEXT_BROKER_HTTP_ALLOW_IPS` (addresses or CIDR ranges, comma separated) refuses every caller whose address is not listed. The caller is the connection's own address; only for a proxy on the same machine (a Cloudflare tunnel) is the `CF-Connecting-IP` header believed instead, so a direct caller cannot claim another address.
+- **Several listen addresses.** `CONTEXT_BROKER_HTTP_ADDR` takes a comma-separated list, for example localhost for the tunnel plus a private-network address for machines on your own network.
 - **No sign-in of its own.** Bind it to `127.0.0.1` and publish it only through a proxy that authenticates callers, for example a Cloudflare Tunnel with a Cloudflare Access application in front. Never bind it to a public address.
 
 ---
@@ -303,7 +304,7 @@ All settings are environment variables. Names are shared with the Python broker 
 | `CONTEXT_BROKER_EMBED_THREADS` | `min(4, cores/2)`, at least 1 | Worker threads for bulk embedding |
 | `CONTEXT_BROKER_IDLE_RESOURCE_TIMEOUT_SECONDS` | `900` | Idle time before the model and indexes are released (`0` disables) |
 | `CONTEXT_BROKER_INDEX_MAX_FILE_BYTES` | `2000000` | Skip larger files (`0` disables the limit) |
-| `CONTEXT_BROKER_HTTP_ADDR` | none (stdio) | Serve MCP over HTTP on this address, for example `127.0.0.1:8765`; requires `CONTEXT_BROKER_PROJECT_ROOT` |
+| `CONTEXT_BROKER_HTTP_ADDR` | none (stdio) | Serve MCP over HTTP on this address (or comma-separated addresses), for example `127.0.0.1:8765`; requires `CONTEXT_BROKER_PROJECT_ROOT` |
 | `CONTEXT_BROKER_HTTP_ALLOW_IPS` | none | HTTP mode: only these caller addresses or CIDR ranges are served |
 | `CONTEXT_BROKER_STORAGE` | `json` | Store for chat memory and saved results: `json`, `obsidian`, `graphify` or `auto` |
 | `CONTEXT_BROKER_STORAGE_DIR` | `~/.context-broker` | Where the `json` store lives |

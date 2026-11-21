@@ -299,20 +299,38 @@ fn respond(app: &Mutex<App>, line: &str) -> Option<Value> {
 }
 
 /// MCP over HTTP (the Streamable HTTP transport, JSON replies): `POST /mcp` with one JSON-RPC
-/// message. There is no sign-in here: bind it to localhost and put an authenticating proxy in
-/// front, which is the only way remote clients should reach it.
-fn serve_http(app: &Mutex<App>, address: &str) -> Result<(), String> {
+/// message, on one or more comma-separated listen addresses. There is no sign-in here: listen on
+/// localhost or a private network, limit callers with the allow-list, and put an authenticating
+/// proxy in front for anything public.
+fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     let root = project::lock_root()?;
     let _ = REMOTE.set(());
-    let allowed = config::http_allowed_networks()?;
-    let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
-    eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
+    let allowed = Arc::new(config::http_allowed_networks()?);
+    let mut listeners = Vec::new();
+    for address in addresses.split(',').map(str::trim).filter(|address| !address.is_empty()) {
+        let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
+        eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
+        let (app, allowed) = (app.clone(), allowed.clone());
+        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed)));
+    }
+    for listener in listeners {
+        let _ = listener.join();
+    }
+    Ok(())
+}
+
+fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network]) {
     let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
     for mut request in server.incoming_requests() {
         let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
-        // Behind a Cloudflare tunnel the caller's address arrives in CF-Connecting-IP, set by
-        // Cloudflare itself. With an allow-list, a request without a listed address is refused.
-        let caller = request.headers().iter().find(|header| header.field.equiv("CF-Connecting-IP")).and_then(|header| header.value.as_str().trim().parse().ok());
+        // Who is calling: the connection's own address, except for a proxy on this machine (a
+        // Cloudflare tunnel), which reports the real caller in CF-Connecting-IP. That header is
+        // believed only from localhost, so a direct caller cannot claim another address.
+        let peer = request.remote_addr().map(|address| address.ip());
+        let caller = match (peer, request.headers().iter().find(|header| header.field.equiv("CF-Connecting-IP"))) {
+            (Some(ip), Some(forwarded)) if ip.is_loopback() => forwarded.value.as_str().trim().parse().ok(),
+            (peer, _) => peer,
+        };
         let response = if !allowed.is_empty() && !caller.is_some_and(|ip| allowed.iter().any(|network| config::network_contains(network, ip))) {
             plain(403, "address not allowed")
         } else if request.url().split('?').next() != Some("/mcp") {
@@ -331,7 +349,6 @@ fn serve_http(app: &Mutex<App>, address: &str) -> Result<(), String> {
         };
         let _ = request.respond(response);
     }
-    Ok(())
 }
 
 fn main() {
@@ -344,7 +361,7 @@ fn main() {
     let app = Arc::new(Mutex::new(App { engine: index::Engine::default(), graphs: graph::Graphs::default(), last_used: Instant::now() }));
     spawn_idle_release(app.clone());
     if let Some(address) = std::env::var("CONTEXT_BROKER_HTTP_ADDR").ok().filter(|v| !v.trim().is_empty()) {
-        if let Err(error) = serve_http(&app, address.trim()) {
+        if let Err(error) = serve_http(app, address.trim()) {
             eprintln!("[broker] {error}");
             std::process::exit(1);
         }
