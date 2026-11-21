@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Obsidian plugin that keeps a vault in sync with a Context Broker server.",
   "private": true,
-  "license": "MIT",
+  "license": "Elastic-2.0",
   "type": "module",
   "scripts": {
     "build": "bun build src/main.ts --outfile main.js --format cjs --target browser --external obsidian --external electron --minify-syntax --minify-whitespace",
