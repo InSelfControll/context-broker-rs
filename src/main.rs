@@ -14,7 +14,7 @@ mod security;
 mod snippet;
 
 use serde_json::{Value, json};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -63,11 +63,41 @@ fn tools() -> Vec<Tool> {
         ("export_memory", "Copy the stored chat history and saved results into Obsidian or Graphify (auto-detected when target is omitted). Call only when the user asks; repeating it adds nothing.",
             json!({"target": {"type": "string", "enum": ["obsidian", "graphify"]}, "all_projects": {"type": "boolean", "default": false}, "project_root": root()}), &[]),
     ];
+    if REMOTE.get().is_some() {
+        // Remote clients have no file access of their own; local agents read files themselves.
+        list.push(("read_file", "Read a file of the project by relative path (as given in search results). Returns numbered lines.",
+            json!({"path": text(), "start_line": {"type": "integer", "default": 1}, "max_lines": {"type": "integer", "default": 200}, "project_root": root()}), &["path"]));
+    }
     if graph_tool_listed() {
         list.push(("query_graph", "Graphify knowledge graph: a node's connections, or with `to` the shortest path between two nodes. Use for callers, dependencies and how things connect.",
             json!({"node": text(), "to": text(), "project_root": root(), "limit": {"type": "integer", "default": 20}}), &["node"]));
     }
     list
+}
+
+/// Set when the server speaks HTTP to remote clients.
+static REMOTE: OnceLock<()> = OnceLock::new();
+const MAX_REQUEST_BYTES: u64 = 1_000_000;
+const MAX_READ_CHARS: usize = 400_000;
+const MAX_READ_REPLY_CHARS: usize = 12_000;
+
+/// Numbered lines of one project file, through the same secret filter as search.
+fn read_file(root: &std::path::Path, path: &str, start_line: usize, max_lines: usize) -> Result<String, String> {
+    let file = project::inside(root, path)?;
+    let rel = project::relative(root, &file);
+    let content = project::read_safe(root, &file, MAX_READ_CHARS).filter(|_| file.is_file()).ok_or_else(|| format!("cannot read {rel}: missing, binary or blocked as secret-bearing"))?;
+    let lines: Vec<&str> = content.lines().collect();
+    let first = start_line.clamp(1, lines.len().max(1));
+    let mut out = String::new();
+    let mut last = first - 1;
+    for (number, line) in lines.iter().enumerate().skip(first - 1).take(max_lines.clamp(1, 2_000)) {
+        if out.len() + line.len() > MAX_READ_REPLY_CHARS {
+            break;
+        }
+        out.push_str(&format!("\n{}: {line}", number + 1));
+        last = number + 1;
+    }
+    Ok(format!("{rel} · lines {first}-{last} of {}{out}", lines.len()))
 }
 
 /// `query_graph` is listed only where it can answer: with Graphify storage, or when the project
@@ -175,9 +205,10 @@ fn call(app: &mut App, name: &str, args: &Value) -> Result<Vec<String>, String> 
             memory::load_session(&root, arg(args, "session_id"), arg(args, "search_query"), arg_usize(args, "limit", 20))?
         }
         "load_cross_session_context" => memory::cross_session(&root, arg(args, "search_query"), arg_usize(args, "top_k", 10))?,
-        "lookup_project_history" => memory::history_lookup(&root, arg(args, "query")),
+        "lookup_project_history" => memory::history_lookup(&root, arg(args, "query"), &mut |texts| app.engine.embed(texts)),
         "list_saved_results" => memory::list_results(&root)?,
         "load_saved_results" => memory::load_results(&root, arg(args, "filename"))?,
+        "read_file" => read_file(&root, arg(args, "path"), arg_usize(args, "start_line", 1), arg_usize(args, "max_lines", 200))?,
         "export_memory" => {
             memory::export(&root, arg(args, "target"), args.get("all_projects").and_then(Value::as_bool).unwrap_or(false))?
         }
@@ -252,6 +283,51 @@ fn spawn_idle_release(app: Arc<Mutex<App>>) {
     });
 }
 
+/// Answer one JSON-RPC message; `None` for notifications, which get no reply.
+fn respond(app: &Mutex<App>, line: &str) -> Option<Value> {
+    Some(match serde_json::from_str::<Value>(line) {
+        Err(error) => json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": error.to_string()}}),
+        Ok(message) => {
+            let id = message.get("id").cloned()?;
+            let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+            match handle(app, method, message.get("params").unwrap_or(&Value::Null)) {
+                Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
+                Err((code, text)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": text}}),
+            }
+        }
+    })
+}
+
+/// MCP over HTTP (the Streamable HTTP transport, JSON replies): `POST /mcp` with one JSON-RPC
+/// message. There is no sign-in here: bind it to localhost and put an authenticating proxy in
+/// front, which is the only way remote clients should reach it.
+fn serve_http(app: &Mutex<App>, address: &str) -> Result<(), String> {
+    let root = project::lock_root()?;
+    let _ = REMOTE.set(());
+    let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
+    eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}", root.display());
+    let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
+    for mut request in server.incoming_requests() {
+        let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
+        let response = if request.url().split('?').next() != Some("/mcp") {
+            plain(404, "not found")
+        } else if *request.method() != tiny_http::Method::Post {
+            plain(405, "use POST").with_header(tiny_http::Header::from_bytes("Allow", "POST").expect("valid header"))
+        } else {
+            let mut body = String::new();
+            match request.as_reader().take(MAX_REQUEST_BYTES).read_to_string(&mut body) {
+                Err(_) => plain(400, "unreadable request body"),
+                Ok(_) => match respond(app, &body) {
+                    Some(reply) => plain(200, &reply.to_string()).with_header(json_type.clone()),
+                    None => plain(202, ""),
+                },
+            }
+        };
+        let _ = request.respond(response);
+    }
+    Ok(())
+}
+
 fn main() {
     // Embedding parallelism is across batches (see embed.rs); keep the inner pool single-threaded
     // so worker threads do not oversubscribe the machine.
@@ -261,6 +337,13 @@ fn main() {
     }
     let app = Arc::new(Mutex::new(App { engine: index::Engine::default(), graphs: graph::Graphs::default(), last_used: Instant::now() }));
     spawn_idle_release(app.clone());
+    if let Some(address) = std::env::var("CONTEXT_BROKER_HTTP_ADDR").ok().filter(|v| !v.trim().is_empty()) {
+        if let Err(error) = serve_http(&app, address.trim()) {
+            eprintln!("[broker] {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -268,18 +351,7 @@ fn main() {
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
-            Err(error) => json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": error.to_string()}}),
-            Ok(message) => {
-                // Notifications (no id) never get a response.
-                let Some(id) = message.get("id").cloned() else { continue };
-                let method = message.get("method").and_then(Value::as_str).unwrap_or("");
-                match handle(&app, method, message.get("params").unwrap_or(&Value::Null)) {
-                    Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-                    Err((code, text)) => json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": text}}),
-                }
-            }
-        };
+        let Some(response) = respond(&app, &line) else { continue };
         if writeln!(stdout, "{response}").and_then(|_| stdout.flush()).is_err() {
             break;
         }

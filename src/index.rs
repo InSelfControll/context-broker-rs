@@ -121,7 +121,7 @@ impl Engine {
         had
     }
 
-    fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
+    pub fn embed(&mut self, texts: Vec<String>) -> Result<Vec<Vec<f32>>, String> {
         if self.model.is_none() {
             self.model = Some(Embedder::load()?);
         }

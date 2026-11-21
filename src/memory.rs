@@ -24,6 +24,11 @@ const MAX_HISTORY_FILES: usize = 128;
 const MAX_MEMORY_DOCS: usize = 512;
 const MAX_HISTORY_FILE_BYTES: u64 = 1_000_000;
 const MAX_EXCERPT_CHARS: usize = 2_000;
+/// Newest exchanges compared by meaning in a history lookup.
+const RECALL_CANDIDATES: usize = 300;
+/// Cosine similarity from which an exchange counts as the same topic as the query. Measured with
+/// all-MiniLM-L6-v2: unrelated questions score below 0.25, reworded ones from about 0.4 up.
+const RECALL_MIN_SCORE: f32 = 0.35;
 const HISTORY_STOPWORDS: &str = "a an the is are was were be been to of for in on at with and or it this that \
 my our your we you i me can could should would please how what why when where \
 do does did has have had make sure fix issue problem help again";
@@ -628,40 +633,139 @@ fn history_terms(text: &str) -> HashSet<String> {
         .collect()
 }
 
+/// What history lookups compare against: each stored message, joined with the short answer right
+/// after it when both fit. Newest sessions first, without repeats or secret-bearing text.
+fn exchanges(root: &Path) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    for stored in sessions(root, None).unwrap_or_default() {
+        let messages = &stored.messages;
+        let mut index = 0;
+        while let Some((_, content)) = messages.get(index) {
+            index += 1;
+            let mut text = content.clone();
+            if let Some((peer, answer)) = messages.get(index)
+                && peer.contains("assistant") && text.chars().count() + answer.chars().count() < MAX_EXCERPT_CHARS {
+                    text = format!("{text}\n{answer}");
+                    // The answer is part of this exchange; it is not a candidate of its own.
+                    index += 1;
+                }
+            if text.chars().count() <= MAX_EXCERPT_CHARS && !security::has_secret_content(&text) && seen.insert(text.clone()) {
+                found.push((stored.source.clone(), text));
+            }
+        }
+    }
+    found
+}
+
 /// Past exchanges that strongly overlap `query` (>= 2 shared terms and >= 60% of the query).
 pub fn history_matches(root: &Path, query: &str) -> Vec<(String, String)> {
     let terms = history_terms(query);
     if terms.len() < 2 {
         return Vec::new();
     }
-    let mut seen = HashSet::new();
-    let mut matches: Vec<(f64, String, String)> = Vec::new();
-    for stored in sessions(root, None).unwrap_or_default() {
-        let messages = &stored.messages;
-        for (i, (_, content)) in messages.iter().enumerate() {
-            // Keep a short adjacent answer with its question when both fit.
-            let mut text = content.clone();
-            if let Some((peer, answer)) = messages.get(i + 1)
-                && peer.contains("assistant") && text.chars().count() + answer.chars().count() < MAX_EXCERPT_CHARS {
-                    text = format!("{text}\n{answer}");
-                }
-            if text.chars().count() > MAX_EXCERPT_CHARS || security::has_secret_content(&text) {
-                continue;
-            }
+    let mut matches: Vec<(f64, String, String)> = exchanges(root)
+        .into_iter()
+        .filter_map(|(source, text)| {
             let overlap = terms.intersection(&history_terms(&text)).count();
             let score = overlap as f64 / terms.len() as f64;
-            if overlap >= 2 && score >= 0.6 && seen.insert(text.clone()) {
-                matches.push((score, stored.source.clone(), text));
-            }
-        }
-    }
+            (overlap >= 2 && score >= 0.6).then_some((score, source, text))
+        })
+        .collect();
     matches.sort_by(|a, b| b.0.total_cmp(&a.0));
     matches.into_iter().take(3).map(|(_, source, text)| (source, text)).collect()
 }
 
-/// Full excerpts for an explicit lookup.
-pub fn history_lookup(root: &Path, query: &str) -> String {
-    let matches = history_matches(root, query);
+/// Turns texts into normalized embedding vectors (the search engine's model).
+pub type Embed<'a> = &'a mut dyn FnMut(Vec<String>) -> Result<Vec<Vec<f32>>, String>;
+
+/// Embeddings of stored exchanges, kept on disk by content hash so each is computed once.
+fn recall_cache(root: &Path) -> PathBuf {
+    config::storage_dir().join("recall").join(format!("{}.bin", project_digest(root)))
+}
+
+/// File layout: the vector length (u32), then per exchange its SHA-256 and its vector (f32 each).
+fn load_vectors(path: &Path) -> HashMap<[u8; 32], Vec<f32>> {
+    let bytes = std::fs::read(path).unwrap_or_default();
+    let Some((head, records)) = bytes.split_at_checked(4) else { return HashMap::new() };
+    let dim = u32::from_le_bytes(head.try_into().expect("four bytes")) as usize;
+    if dim == 0 || records.len() % (32 + dim * 4) != 0 {
+        return HashMap::new();
+    }
+    records
+        .chunks_exact(32 + dim * 4)
+        .map(|record| {
+            let (key, vector) = record.split_at(32);
+            (key.try_into().expect("32 bytes"), vector.chunks_exact(4).map(|f| f32::from_le_bytes(f.try_into().expect("four bytes"))).collect())
+        })
+        .collect()
+}
+
+/// Past exchanges that mean the same as `query`, even when they share no words with it.
+fn semantic_matches(root: &Path, query: &str, embed: Embed) -> Result<Vec<(String, String)>, String> {
+    let candidates: Vec<(String, String)> = exchanges(root).into_iter().take(RECALL_CANDIDATES).collect();
+    if candidates.is_empty() || query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let keys: Vec<[u8; 32]> = candidates
+        .iter()
+        .map(|(_, text)| {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&Sha256::digest(text.as_bytes()));
+            key
+        })
+        .collect();
+    let path = recall_cache(root);
+    let mut cached = load_vectors(&path);
+    let missing: Vec<usize> = (0..candidates.len()).filter(|&index| !cached.contains_key(&keys[index])).collect();
+    // One model call: the exchanges not embedded yet, then the query.
+    let mut inputs: Vec<String> = missing.iter().map(|&index| candidates[index].1.clone()).collect();
+    inputs.push(query.to_string());
+    let mut vectors = embed(inputs)?;
+    let wanted = vectors.pop().ok_or("empty query embedding")?;
+    for (&index, vector) in missing.iter().zip(vectors) {
+        cached.insert(keys[index], vector);
+    }
+    if !missing.is_empty() {
+        // Rewrite with only the exchanges that still exist, so the file does not grow forever.
+        let mut bytes = (wanted.len() as u32).to_le_bytes().to_vec();
+        for key in keys.iter().collect::<HashSet<_>>() {
+            if let Some(vector) = cached.get(key).filter(|vector| vector.len() == wanted.len()) {
+                bytes.extend_from_slice(key);
+                bytes.extend(vector.iter().flat_map(|value| value.to_le_bytes()));
+            }
+        }
+        let saved = std::fs::create_dir_all(path.parent().expect("recall dir")).and_then(|_| atomic_write(&path, &bytes));
+        if let Err(error) = saved {
+            eprintln!("[broker] recall cache not saved: {error}");
+        }
+    }
+    let mut scored: Vec<(f32, usize)> = (0..candidates.len())
+        .filter_map(|index| {
+            let vector = cached.get(&keys[index]).filter(|vector| vector.len() == wanted.len())?;
+            Some((vector.iter().zip(&wanted).map(|(a, b)| a * b).sum(), index))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+    eprintln!("[broker] recall: {} exchange(s), {} newly embedded, best score {:.2}", candidates.len(), missing.len(), scored.first().map_or(0.0, |best| best.0));
+    Ok(scored.into_iter().take_while(|(score, _)| *score >= RECALL_MIN_SCORE).take(3).map(|(_, index)| candidates[index].clone()).collect())
+}
+
+/// Full excerpts for an explicit lookup: exchanges that share the query's words, then exchanges
+/// that mean the same in other words.
+pub fn history_lookup(root: &Path, query: &str, embed: Embed) -> String {
+    let mut matches = history_matches(root, query);
+    match semantic_matches(root, query, embed) {
+        Ok(similar) => {
+            for found in similar {
+                if matches.len() < 3 && !matches.contains(&found) {
+                    matches.push(found);
+                }
+            }
+        }
+        // Without the model the word-overlap matches still stand.
+        Err(error) => eprintln!("[broker] semantic recall unavailable: {error}"),
+    }
     if matches.is_empty() {
         return "No related project history.".into();
     }

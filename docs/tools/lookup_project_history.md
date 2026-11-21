@@ -32,4 +32,6 @@ Files with secret-like names or content are never indexed; they are skipped unti
 
 No match: `No related project history.` Exchanges over 2,000 characters or containing secret signatures are ignored.
 
+Matching is by shared words first (at least 2 shared terms and 60% of the query), then by meaning: stored exchanges are embedded once with the search model and cached, so a question asked in different words ("how to roll back a release") still finds the earlier answer ("Redeploy the previous tag.").
+
 [Back to all tools](../TOOLS.md)

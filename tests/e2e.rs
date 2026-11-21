@@ -31,6 +31,7 @@ impl Server {
             .env_remove("CONTEXT_BROKER_OBSIDIAN_VAULT")
             .env_remove("CONTEXT_BROKER_OBSIDIAN_FOLDER")
             .env_remove("CONTEXT_BROKER_OBSIDIAN_LAYOUT")
+            .env_remove("CONTEXT_BROKER_HTTP_ADDR")
             // Nothing installed on the test machine may be detected: no Obsidian settings, empty PATH.
             .env("CONTEXT_BROKER_OBSIDIAN_CONFIG", storage.join("no-obsidian.json"))
             .env("PATH", storage)
@@ -218,6 +219,12 @@ fn full_mcp_session() {
     let history = server.ok("lookup_project_history", json!({"query": "Redis startup timeout", "project_root": root_arg}));
     assert!(history.contains("correcting the Redis port to 6380"));
     assert_eq!(server.ok("lookup_project_history", json!({"query": "avatar cropping", "project_root": root_arg})), "No related project history.");
+    // The same problem in other words, sharing no terms with what was stored, is found by meaning.
+    let reworded = server.ok("lookup_project_history", json!({"query": "how to roll back a release", "project_root": root_arg}));
+    assert!(reworded.contains("Redeploy the previous tag.") && !reworded.contains("6380"), "{reworded}");
+    assert!(server.ok("lookup_project_history", json!({"query": "redis does not start after reboot", "project_root": root_arg})).contains("Redis port to 6380"));
+    assert_eq!(server.ok("lookup_project_history", json!({"query": "how do I bake sourdough bread", "project_root": root_arg})), "No related project history.");
+    assert!(storage.join("recall").read_dir().unwrap().count() == 1, "exchange embeddings are cached per project");
     let (related, _) = server.call("search_context", json!({"query": "Redis startup timeout", "project_root": root_arg}));
     assert_eq!(related.len(), 2);
     assert!(related[1].starts_with("Related past work") && related[1].contains("Redis port") && related[1].len() < 900);
@@ -245,12 +252,14 @@ fn full_mcp_session() {
     assert!(log_text.contains("index ready: 4 files (3 reused, 1 embedded, 1 skipped)"), "{log_text}");
     assert!(log_text.contains("index ready: 3 files (3 reused, 0 embedded, 1 skipped)"), "{log_text}");
     assert!(log_text.contains("index loaded from disk (3 files)"), "{log_text}");
+    assert!(log_text.contains("recall: 3 exchange(s), 3 newly embedded") && log_text.contains("recall: 3 exchange(s), 0 newly embedded"), "{log_text}");
     assert!(storage.join("chats").is_dir() && !root.join(".context-broker").exists());
 
     obsidian_store(&base, &root, &storage, &log);
     graphify_store(&root, &storage, &log);
     detection_and_export(&base, &root, &storage, &log);
     obsidian_vault_conventions(&base, &root, &storage, &log);
+    remote_http(&base, &root, &storage, &log);
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -515,4 +524,57 @@ fn obsidian_vault_conventions(base: &Path, root: &Path, storage: &Path, log: &Pa
     server.ok("record_turn", json!({"session_id": "own", "project_root": root_arg, "user_message": "Own layout."}));
     assert!(std::fs::read_dir(vault.join("Inbox/Notes/Context Broker")).unwrap().flatten().any(|entry| entry.path().join("Chats/own.md").is_file()));
     server.shutdown();
+}
+
+/// The HTTP transport for remote clients: same tools, confined to one project.
+fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
+    use std::io::Read;
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let address = format!("127.0.0.1:{port}");
+    // Without a project to confine it to, the server refuses to start.
+    let mut unconfined = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address))]);
+    assert!(!unconfined.child.wait().unwrap().success());
+    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", root)]);
+    let http = |method: &str, path: &str, body: &str| -> (u16, String) {
+        let mut stream = (0..100)
+            .find_map(|_| std::net::TcpStream::connect(&address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
+            .expect("server is listening");
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        let (head, text) = reply.split_once("\r\n\r\n").unwrap();
+        (head.split_whitespace().nth(1).unwrap().parse().unwrap(), text.to_string())
+    };
+    let rpc = |method: &str, params: Value| -> Value {
+        let (status, text) = http("POST", "/mcp", &json!({"jsonrpc": "2.0", "id": 7, "method": method, "params": params}).to_string());
+        assert_eq!(status, 200, "{text}");
+        serde_json::from_str(&text).unwrap()
+    };
+    let call = |name: &str, args: Value| -> (String, bool) {
+        let reply = rpc("tools/call", json!({"name": name, "arguments": args}));
+        (reply["result"]["content"][0]["text"].as_str().unwrap().to_string(), reply["result"]["isError"].as_bool().unwrap())
+    };
+
+    assert_eq!(rpc("initialize", json!({"protocolVersion": "2025-06-18"}))["result"]["serverInfo"]["name"], "context-broker");
+    assert_eq!(http("POST", "/mcp", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).0, 202);
+    assert_eq!((http("GET", "/mcp", "").0, http("POST", "/elsewhere", "{}").0), (405, 404));
+    let listing = rpc("tools/list", json!({}));
+    let names: Vec<&str> = listing["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"read_file") && names.contains(&"search_context"), "{names:?}");
+
+    // The project is the configured one; a caller cannot point the server anywhere else.
+    assert!(call("search_context", json!({"query": "charge credit card", "top_k": 1})).0.contains("### src/billing.py"));
+    for outside in [base.to_str().unwrap(), "/etc", "../.."] {
+        let (text, is_error) = call("search_context", json!({"query": "x", "project_root": outside}));
+        assert!(is_error && text.contains("project_root must be inside"), "{text}");
+    }
+    let (file, _) = call("read_file", json!({"path": "src/billing.py", "start_line": 4, "max_lines": 2}));
+    assert_eq!(file, "src/billing.py · lines 4-5 of 6\n4: def refund_payment(invoice):\n5:     \"\"\"Return money to the customer.\"\"\"");
+    for blocked in ["../storage/no-obsidian.json", "/etc/hostname", ".env", "src/settings.py", "src/missing.py"] {
+        let (text, is_error) = call("read_file", json!({"path": blocked}));
+        assert!(is_error && !text.contains("secret-in-dotenv") && !text.contains("abc123secretvalue"), "{blocked}: {text}");
+    }
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    drop(server.stdin.take());
 }

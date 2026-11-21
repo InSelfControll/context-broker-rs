@@ -4,9 +4,29 @@ use crate::config::{self, IGNORE_DIRS, PROJECT_MARKERS, SUPPORTED_EXTENSIONS};
 use crate::security;
 use ignore::WalkBuilder;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+static LOCKED_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Confine every call to `CONTEXT_BROKER_PROJECT_ROOT`. Used when serving remote clients, which
+/// must not be able to point the server at other folders of the machine.
+pub fn lock_root() -> Result<PathBuf, String> {
+    let configured = std::env::var("CONTEXT_BROKER_PROJECT_ROOT").ok().filter(|v| !v.is_empty()).ok_or("CONTEXT_BROKER_PROJECT_ROOT is required when serving over HTTP")?;
+    let root = PathBuf::from(&configured).canonicalize().map_err(|e| format!("project root {configured}: {e}"))?;
+    Ok(LOCKED_ROOT.get_or_init(|| root).clone())
+}
+
+/// `path` inside `root`, resolved; refused when it leaves the root (`..`, absolute paths, symlinks).
+pub fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
+    let resolved = root.join(path.trim()).canonicalize().map_err(|_| format!("not found: {path}"))?;
+    if resolved.starts_with(root) { Ok(resolved) } else { Err(format!("outside the project: {path}")) }
+}
 
 /// Explicit argument, then `CONTEXT_BROKER_PROJECT_ROOT`, then marker detection, then CWD.
 pub fn resolve_root(explicit: &str) -> Result<PathBuf, String> {
+    if let Some(locked) = LOCKED_ROOT.get() {
+        return if explicit.trim().is_empty() { Ok(locked.clone()) } else { inside(locked, explicit).map_err(|_| format!("project_root must be inside {}", locked.display())) };
+    }
     let candidate = if !explicit.trim().is_empty() {
         PathBuf::from(explicit.trim())
     } else if let Some(env_root) = std::env::var("CONTEXT_BROKER_PROJECT_ROOT").ok().filter(|v| !v.is_empty()) {

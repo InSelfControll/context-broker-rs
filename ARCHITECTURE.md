@@ -166,6 +166,10 @@ flowchart LR
 - **History.** Lookups read the 128 most recently modified ledgers (each up to 1 MB) from the global store and from `<project>/.context-broker/chats/<digest>/`. `lookup_project_history` and the automatic note use term overlap: at least 2 shared terms and at least 60% of the query's terms; an exchange is a question plus the assistant message that follows it when both fit in 2,000 characters.
 - **Saved results.** `<storage>/results/<digest>/<name>.json` with `{project_root, query, saved_at, results}`.
 
+### Recall by meaning
+
+`lookup_project_history` first takes the term-overlap matches, then adds exchanges that mean the same as the query in other words (`memory::semantic_matches`). The 300 newest exchanges are embedded with the search model and compared with the query by cosine similarity; those at 0.35 or above count, best first, up to three results in total. Each exchange is embedded once: vectors are kept in `<storage>/recall/<project digest>.bin`, keyed by the SHA-256 of the exchange text, for every store, and the file is rewritten without exchanges that no longer exist. A message directly answered by the assistant forms one exchange with its answer and is not compared a second time on its own. If the model cannot be loaded, the term-overlap matches are returned alone. The automatic note on search replies stays term-overlap only, so it adds no model work.
+
 ### Other stores
 
 `CONTEXT_BROKER_STORAGE` (`config::store`) selects where `memory.rs` reads and writes. The JSON layout above is the default. The public functions are the same for every store; each store supplies only how a session is written and how sessions are read back as `(peer, content)` messages.
@@ -194,6 +198,10 @@ In the AI-chat layout a session is `AI Chats/Chats/Context Broker/Context Broker
 `graph.rs` reads `<project>/graphify-out/graph.json` (node-link JSON: `nodes` with `id`, `label`, `source_file`, `source_location`, `community`; `links` or `edges` with `source`, `target`, `relation`, `confidence`). Only those fields are deserialized. Edges with an endpoint outside the node set are dropped. A parsed graph is kept per project root until the file's modification time changes, and is released with the other idle resources.
 
 `query_graph` resolves a name in this order: exact id; exact label ignoring case (the most connected node wins when several share it); label substring; then, for a question rather than a name, nodes ranked by how many of its words their label carries. One match is used; several are returned as a list of ids to choose from. With `to`, a breadth-first search over undirected adjacency gives the shortest chain, printed with each edge's real direction. `EXTRACTED` edges are printed without a tag; any other confidence is shown.
+
+## HTTP transport
+
+With `CONTEXT_BROKER_HTTP_ADDR` set, `main.rs` serves `POST /mcp` with `tiny_http` instead of reading stdin: one JSON-RPC message per request, answered as `application/json` (notifications get `202`), other methods `405`, other paths `404`, bodies capped at 1 MB. Requests are handled one at a time through the same `respond` function as stdio. `project::lock_root` confines every call to `CONTEXT_BROKER_PROJECT_ROOT`: an explicit `project_root` must resolve inside it. In this mode the tool list gains `read_file`, which resolves a relative path inside the root (`project::inside` refuses `..`, absolute paths and symlinks that leave it) and returns numbered lines through `project::read_safe`. The transport has no authentication; it is meant to listen on localhost behind an authenticating proxy.
 
 ## Threading and idle release
 
