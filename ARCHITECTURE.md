@@ -203,6 +203,10 @@ In the AI-chat layout a session is `AI Chats/Chats/Context Broker/Context Broker
 
 With `CONTEXT_BROKER_HTTP_ADDR` set, `main.rs` serves `POST /mcp` with `tiny_http` instead of reading stdin: one JSON-RPC message per request, answered as `application/json` (notifications get `202`), other methods `405`, other paths `404`, bodies capped at 1 MB. Requests are handled one at a time through the same `respond` function as stdio. `project::lock_root` confines every call to `CONTEXT_BROKER_PROJECT_ROOT`: an explicit `project_root` must resolve inside it. In this mode the tool list gains `read_file`, which resolves a relative path inside the root (`project::inside` refuses `..`, absolute paths and symlinks that leave it) and returns numbered lines through `project::read_safe`. The transport has no authentication; it is meant to listen on localhost behind an authenticating proxy.
 
+### File sync endpoints
+
+`sync.rs` serves `/sync/manifest` and `/sync/file?path=` (GET, PUT, DELETE) when `CONTEXT_BROKER_SYNC=1`, behind the same caller checks as `/mcp`. The manifest lists every regular file under the root with size, modification time and SHA-256; hashes are cached while a file's time and size are unchanged. A path is refused when any component is empty, starts with a dot, or is `..`, and when it names one of the broker's lock or temporary files; symlinks and files over 50 MB are skipped. `PUT` and `DELETE` carry `X-Base-Hash`, the content the caller last saw (empty for "no file"): if the server's file differs from both that and the new content, the reply is `409` with the current hash and nothing changes. Writes go through a temporary file and rename, and new folders must resolve inside the root.
+
 ## Threading and idle release
 
 - **Main thread** reads stdin and answers requests one at a time. All engine state (the model, the per-project indexes) sits behind one `Mutex<App>`.

@@ -261,6 +261,7 @@ fn full_mcp_session() {
     obsidian_vault_conventions(&base, &root, &storage, &log);
     remote_http(&base, &root, &storage, &log);
     access_sign_in(&base, &root, &storage, &log);
+    file_sync(&base, &storage, &log);
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -667,6 +668,107 @@ fn access_sign_in(base: &Path, root: &Path, storage: &Path, log: &Path) {
         ("a tampered token", format!("{}x", valid)), ("not a token", "garbage".to_string())] {
         assert_eq!(status(outsider, &forged), 403, "{why}");
     }
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    drop(server.stdin.take());
+}
+
+/// The file-sync endpoints a remote copy of the folder (the Obsidian plugin) talks to.
+fn file_sync(base: &Path, storage: &Path, log: &Path) {
+    use std::io::Read;
+    let vault = base.join("sync-vault");
+    write(&vault, "Existing.md", "already here\n");
+    write(&vault, ".obsidian/app.json", "{}");
+    write(&vault, "Folder/.hidden.md", "hidden");
+    write(&vault, "Note.lock", "scratch");
+    let vault = vault.canonicalize().unwrap();
+    let address = format!("127.0.0.1:{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+    let http = |method: &str, target: &str, base_hash: Option<&str>, body: &[u8]| -> (u16, String, Vec<u8>) {
+        let mut stream = (0..100)
+            .find_map(|_| std::net::TcpStream::connect(&address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
+            .expect("server is listening");
+        let guard = base_hash.map(|hash| format!("X-Base-Hash: {hash}\r\n")).unwrap_or_default();
+        write!(stream, "{method} {target} HTTP/1.1\r\nHost: {address}\r\n{guard}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len()).unwrap();
+        stream.write_all(body).unwrap();
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).unwrap();
+        let split = reply.windows(4).position(|window| window == b"\r\n\r\n").unwrap();
+        let head = String::from_utf8_lossy(&reply[..split]).into_owned();
+        let mut body = reply[split + 4..].to_vec();
+        if head.to_lowercase().contains("transfer-encoding: chunked") {
+            // Large replies arrive in chunks: "<hex length>\r\n<bytes>\r\n", ended by a zero length.
+            let (mut rest, mut whole) = (body.as_slice(), Vec::new());
+            while let Some(line_end) = rest.windows(2).position(|window| window == b"\r\n") {
+                let length = usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).unwrap().trim(), 16).unwrap();
+                if length == 0 {
+                    break;
+                }
+                whole.extend_from_slice(&rest[line_end + 2..line_end + 2 + length]);
+                rest = &rest[line_end + 4 + length..];
+            }
+            body = whole;
+        }
+        (head.split_whitespace().nth(1).unwrap().parse().unwrap(), head, body)
+    };
+    let json_of = |body: &[u8]| -> Value { serde_json::from_slice(body).unwrap() };
+
+    // Off unless asked for: without CONTEXT_BROKER_SYNC the routes do not exist.
+    let mut plain = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", &vault)]);
+    assert_eq!(http("GET", "/sync/manifest", None, b"").0, 404);
+    plain.child.kill().unwrap();
+    plain.child.wait().unwrap();
+    drop(plain.stdin.take());
+
+    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", &vault), ("CONTEXT_BROKER_SYNC", Path::new("1"))]);
+    let manifest = || -> Vec<(String, String)> {
+        let (status, _, body) = http("GET", "/sync/manifest", None, b"");
+        assert_eq!(status, 200);
+        json_of(&body)["files"].as_array().unwrap().iter().map(|file| (file["path"].as_str().unwrap().to_string(), file["hash"].as_str().unwrap().to_string())).collect()
+    };
+    // Hidden files and folders and the broker's scratch files are never listed.
+    let listed = manifest();
+    assert_eq!(listed.iter().map(|(path, _)| path.as_str()).collect::<Vec<_>>(), ["Existing.md"]);
+    let existing_hash = listed[0].1.clone();
+    assert_eq!(existing_hash.len(), 64);
+
+    // Read; create in a new folder (a name with spaces and non-ASCII letters); binary content.
+    let (status, head, body) = http("GET", "/sync/file?path=Existing.md", None, b"");
+    assert!(status == 200 && body == b"already here\n" && head.to_lowercase().contains(&format!("x-content-hash: {existing_hash}")), "{head}");
+    assert_eq!(http("GET", "/sync/file?path=Missing.md", None, b"").0, 404);
+    let binary: Vec<u8> = (0..=255u8).cycle().take(70_000).collect();
+    let (status, _, body) = http("PUT", "/sync/file?path=New%20Folder/%D7%A9%D7%9C%D7%95%D7%9D+pic.bin", Some(""), &binary);
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(std::fs::read(vault.join("New Folder/שלום pic.bin")).unwrap(), binary);
+    assert_eq!(http("GET", "/sync/file?path=New%20Folder/%D7%A9%D7%9C%D7%95%D7%9D%20pic.bin", None, b"").2, binary);
+
+    // A write must name what it replaces: a stale base is refused and reports the current hash.
+    let (status, _, body) = http("PUT", "/sync/file?path=Existing.md", Some(&existing_hash), b"edited on device A\n");
+    let hash_a = json_of(&body)["hash"].as_str().unwrap().to_string();
+    assert!(status == 200 && hash_a != existing_hash);
+    let (status, _, body) = http("PUT", "/sync/file?path=Existing.md", Some(&existing_hash), b"edited on device B\n");
+    assert!(status == 409 && json_of(&body)["hash"] == hash_a.as_str(), "the second device learns it is behind");
+    assert_eq!(std::fs::read(vault.join("Existing.md")).unwrap(), b"edited on device A\n");
+    assert_eq!(http("PUT", "/sync/file?path=Existing.md", Some(""), b"edited on device A\n").0, 200, "sending what is already there is fine");
+    assert_eq!(http("PUT", "/sync/file?path=Existing.md", Some(""), b"new file claim\n").0, 409, "it does exist");
+
+    // Deletes are guarded the same way.
+    assert_eq!(http("DELETE", "/sync/file?path=Existing.md", Some(&existing_hash), b"").0, 409);
+    assert!(vault.join("Existing.md").exists());
+    assert_eq!(http("DELETE", "/sync/file?path=Existing.md", Some(&hash_a), b"").0, 200);
+    assert!(!vault.join("Existing.md").exists());
+    assert_eq!(http("DELETE", "/sync/file?path=Existing.md", Some(&hash_a), b"").0, 200, "already gone");
+
+    // Nothing hidden, outside the folder, or scratch can be read, written or deleted.
+    for bad in [".obsidian/app.json", "Folder/.hidden.md", "../storage/x", "/etc/hostname", "a//b.md", "Note.lock", "..%2F..%2Fetc%2Fpasswd", ""] {
+        for (method, guard) in [("GET", None), ("PUT", Some("")), ("DELETE", Some(""))] {
+            let (status, _, _) = http(method, &format!("/sync/file?path={bad}"), guard, b"x");
+            assert_eq!(status, 400, "{method} {bad:?}");
+        }
+    }
+    assert_eq!(std::fs::read_to_string(vault.join(".obsidian/app.json")).unwrap(), "{}");
+    let after: Vec<String> = manifest().into_iter().map(|(path, _)| path).collect();
+    assert_eq!(after, ["New Folder/שלום pic.bin"]);
+    assert_eq!(http("POST", "/sync/file?path=x.md", None, b"").0, 404);
     server.child.kill().unwrap();
     server.child.wait().unwrap();
     drop(server.stdin.take());

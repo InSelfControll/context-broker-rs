@@ -13,6 +13,7 @@ mod memory;
 mod project;
 mod security;
 mod snippet;
+mod sync;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
@@ -311,12 +312,17 @@ fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     if verifier.is_some() {
         eprintln!("[broker] callers signed in through Cloudflare Access are accepted");
     }
+    // File sync for remote copies of the folder is opt-in: it lets callers write and delete files.
+    let files = Arc::new(std::env::var("CONTEXT_BROKER_SYNC").is_ok_and(|v| v.trim() == "1").then(|| sync::Sync::new(root.clone())));
+    if files.is_some() {
+        eprintln!("[broker] file sync enabled at /sync");
+    }
     let mut listeners = Vec::new();
     for address in addresses.split(',').map(str::trim).filter(|address| !address.is_empty()) {
         let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
         eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
-        let (app, allowed, verifier) = (app.clone(), allowed.clone(), verifier.clone());
-        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed, verifier.as_ref().as_ref())));
+        let (app, allowed, verifier, files) = (app.clone(), allowed.clone(), verifier.clone(), files.clone());
+        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed, verifier.as_ref().as_ref(), files.as_ref().as_ref())));
     }
     for listener in listeners {
         let _ = listener.join();
@@ -324,10 +330,32 @@ fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network], verifier: Option<&access::Verifier>) {
+/// Answer one `/sync/...` request: `manifest`, or `file?path=...` with GET, PUT or DELETE.
+fn sync_reply(files: &sync::Sync, request: &mut tiny_http::Request, route: &str, query: &str) -> sync::Reply {
+    let header = |name: &'static str| request.headers().iter().find(|header| header.field.equiv(name)).map(|header| header.value.as_str().trim().to_string()).unwrap_or_default();
+    let path = query.split('&').find_map(|pair| pair.strip_prefix("path=")).map(sync::percent_decode).unwrap_or_default();
+    let base = header("X-Base-Hash");
+    match (request.method().clone(), route) {
+        (tiny_http::Method::Get, "manifest") => files.manifest(),
+        (tiny_http::Method::Get, "file") => files.read(&path),
+        (tiny_http::Method::Delete, "file") => files.delete(&path, &base),
+        (tiny_http::Method::Put, "file") => {
+            let mut body = Vec::new();
+            match request.as_reader().take(sync::MAX_FILE_BYTES + 1).read_to_end(&mut body) {
+                Ok(_) if body.len() as u64 <= sync::MAX_FILE_BYTES => files.write(&path, &base, &body),
+                Ok(_) => sync::Reply::Json(413, json!({"error": "file too large"})),
+                Err(_) => sync::Reply::Json(400, json!({"error": "unreadable request body"})),
+            }
+        }
+        _ => sync::Reply::Json(404, json!({"error": "not found"})),
+    }
+}
+
+fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network], verifier: Option<&access::Verifier>, files: Option<&sync::Sync>) {
     let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
     for mut request in server.incoming_requests() {
         let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
+        let url = request.url().to_string();
         // Who is calling: the connection's own address, except for a proxy on this machine (a
         // Cloudflare tunnel), which reports the real caller in CF-Connecting-IP. That header is
         // believed only from localhost, so a direct caller cannot claim another address.
@@ -346,7 +374,14 @@ fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Networ
         let restricted = !allowed.is_empty() || verifier.is_some();
         let response = if restricted && !(!allowed.is_empty() && listed) && !signed_in() {
             plain(403, "not allowed: unknown address and no valid sign-in")
-        } else if request.url().split('?').next() != Some("/mcp") {
+        } else if let (Some(files), Some(route)) = (files, url.split('?').next().and_then(|path| path.strip_prefix("/sync/"))) {
+            match sync_reply(files, &mut request, route, url.split_once('?').map_or("", |(_, query)| query)) {
+                sync::Reply::Json(status, body) => plain(status, &body.to_string()).with_header(json_type.clone()),
+                sync::Reply::File(bytes, hash) => tiny_http::Response::from_data(bytes)
+                    .with_header(tiny_http::Header::from_bytes("Content-Type", "application/octet-stream").expect("valid header"))
+                    .with_header(tiny_http::Header::from_bytes("X-Content-Hash", hash).expect("valid header")),
+            }
+        } else if url.split('?').next() != Some("/mcp") {
             plain(404, "not found")
         } else if *request.method() != tiny_http::Method::Post {
             plain(405, "use POST").with_header(tiny_http::Header::from_bytes("Allow", "POST").expect("valid header"))
