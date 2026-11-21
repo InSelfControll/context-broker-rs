@@ -260,6 +260,7 @@ fn full_mcp_session() {
     detection_and_export(&base, &root, &storage, &log);
     obsidian_vault_conventions(&base, &root, &storage, &log);
     remote_http(&base, &root, &storage, &log);
+    access_sign_in(&base, &root, &storage, &log);
     let _ = std::fs::remove_dir_all(base);
 }
 
@@ -599,6 +600,73 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
     }
     // Every listen address serves, with the same rules.
     assert_eq!((status_at(&second, "203.0.113.9"), status_at(&second, "")), (200, 403));
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    drop(server.stdin.take());
+}
+
+/// Callers signed in through Cloudflare Access are accepted by their token, whatever their address.
+fn access_sign_in(base: &Path, root: &Path, storage: &Path, log: &Path) {
+    use std::io::Read;
+    // A throwaway signing key, and a stand-in for the team's public-key endpoint.
+    let key_file = base.join("access-test-key.pem");
+    assert!(Command::new("openssl").args(["genrsa", "-out"]).arg(&key_file).arg("2048").stderr(Stdio::null()).status().unwrap().success());
+    let modulus = String::from_utf8(Command::new("openssl").args(["rsa", "-noout", "-modulus", "-in"]).arg(&key_file).output().unwrap().stdout).unwrap();
+    let hex = modulus.trim().trim_start_matches("Modulus=");
+    let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut n = String::new();
+    for chunk in bytes.chunks(3) {
+        let word = chunk.iter().fold(0u32, |acc, byte| acc << 8 | u32::from(*byte)) << (8 * (3 - chunk.len()));
+        for position in 0..=chunk.len() {
+            n.push(alphabet[(word >> (18 - 6 * position) & 63) as usize] as char);
+        }
+    }
+    let certs = json!({"keys": [{"kid": "k1", "kty": "RSA", "alg": "RS256", "n": n, "e": "AQAB"}]}).to_string();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let certs_url = format!("http://{}/cdn-cgi/access/certs", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.read(&mut [0u8; 2048]);
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{certs}", certs.len());
+        }
+    });
+
+    let signing = jsonwebtoken::EncodingKey::from_rsa_pem(&std::fs::read(&key_file).unwrap()).unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let token = |issuer: &str, audience: &str, expires: u64, key_id: &str| {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(key_id.to_string());
+        jsonwebtoken::encode(&header, &json!({"iss": issuer, "aud": [audience], "exp": expires, "email": "owner@example.com"}), &signing).unwrap()
+    };
+
+    let address = format!("127.0.0.1:{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", root),
+        ("CONTEXT_BROKER_HTTP_ALLOW_IPS", Path::new("203.0.113.0/24")), ("CONTEXT_BROKER_ACCESS_TEAM_DOMAIN", Path::new("team.example")),
+        ("CONTEXT_BROKER_ACCESS_AUD", Path::new("app-audience")), ("CONTEXT_BROKER_ACCESS_CERTS_URL", Path::new(&certs_url))]);
+    let status = |caller: &str, token: &str| -> u16 {
+        let mut stream = (0..100)
+            .find_map(|_| std::net::TcpStream::connect(&address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
+            .expect("server is listening");
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let sign_in = if token.is_empty() { String::new() } else { format!("Cf-Access-Jwt-Assertion: {token}\r\n") };
+        write!(stream, "POST /mcp HTTP/1.1\r\nHost: {address}\r\nCF-Connecting-IP: {caller}\r\n{sign_in}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply.split_whitespace().nth(1).unwrap().parse().unwrap()
+    };
+    let outsider = "198.51.100.50";
+    let valid = token("https://team.example", "app-audience", now + 600, "k1");
+    assert_eq!(status(outsider, &valid), 200, "a signed-in caller from any address");
+    assert_eq!(status("203.0.113.9", ""), 200, "a listed address needs no sign-in");
+    assert_eq!(status(outsider, ""), 403, "an unknown address without sign-in");
+    for (why, forged) in [("another application's token", token("https://team.example", "other-app", now + 600, "k1")),
+        ("another team's token", token("https://evil.example", "app-audience", now + 600, "k1")),
+        ("an expired token", token("https://team.example", "app-audience", now - 600, "k1")),
+        ("an unknown signing key", token("https://team.example", "app-audience", now + 600, "k2")),
+        ("a tampered token", format!("{}x", valid)), ("not a token", "garbage".to_string())] {
+        assert_eq!(status(outsider, &forged), 403, "{why}");
+    }
     server.child.kill().unwrap();
     server.child.wait().unwrap();
     drop(server.stdin.take());

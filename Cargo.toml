@@ -1,6 +1,6 @@
 [package]
 name = "context-broker"
-version = "0.2.2"
+version = "0.3.0"
 edition = "2024"
 description = "Token-lean semantic code search and project memory MCP server"
 license = "MIT"
@@ -16,6 +16,7 @@ candle-nn = "0.11.1"
 candle-transformers = "0.11.1"
 globset = "0.4.21"
 ignore = "0.4.34"
+jsonwebtoken = "9.3.1"
 libc = "0.2.191"
 regex = "1.13.2"
 serde = { version = "1.0.229", features = ["derive"] }

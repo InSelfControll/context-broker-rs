@@ -3,6 +3,7 @@
 //! Speaks MCP (JSON-RPC 2.0, one message per line) over stdio. Replies are plain text, sent
 //! once, with no telemetry. The process exits when stdin closes.
 
+mod access;
 mod config;
 mod embed;
 mod graph;
@@ -306,12 +307,16 @@ fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     let root = project::lock_root()?;
     let _ = REMOTE.set(());
     let allowed = Arc::new(config::http_allowed_networks()?);
+    let verifier = Arc::new(access::Verifier::from_env()?);
+    if verifier.is_some() {
+        eprintln!("[broker] callers signed in through Cloudflare Access are accepted");
+    }
     let mut listeners = Vec::new();
     for address in addresses.split(',').map(str::trim).filter(|address| !address.is_empty()) {
         let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
         eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
-        let (app, allowed) = (app.clone(), allowed.clone());
-        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed)));
+        let (app, allowed, verifier) = (app.clone(), allowed.clone(), verifier.clone());
+        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed, verifier.as_ref().as_ref())));
     }
     for listener in listeners {
         let _ = listener.join();
@@ -319,7 +324,7 @@ fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network]) {
+fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network], verifier: Option<&access::Verifier>) {
     let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
     for mut request in server.incoming_requests() {
         let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
@@ -331,8 +336,16 @@ fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Networ
             (Some(ip), Some(forwarded)) if ip.is_loopback() => forwarded.value.as_str().trim().parse().ok(),
             (peer, _) => peer,
         };
-        let response = if !allowed.is_empty() && !caller.is_some_and(|ip| allowed.iter().any(|network| config::network_contains(network, ip))) {
-            plain(403, "address not allowed")
+        // A caller gets in by address, or by a valid Cloudflare Access token. Like the address
+        // header, the token header is only read from the local proxy.
+        let listed = caller.is_some_and(|ip| allowed.iter().any(|network| config::network_contains(network, ip)));
+        let signed_in = || {
+            let token = request.headers().iter().find(|header| header.field.equiv("Cf-Access-Jwt-Assertion"));
+            peer.is_some_and(|ip| ip.is_loopback()) && verifier.is_some_and(|verifier| token.is_some_and(|token| verifier.accepts(token.value.as_str())))
+        };
+        let restricted = !allowed.is_empty() || verifier.is_some();
+        let response = if restricted && !(!allowed.is_empty() && listed) && !signed_in() {
+            plain(403, "not allowed: unknown address and no valid sign-in")
         } else if request.url().split('?').next() != Some("/mcp") {
             plain(404, "not found")
         } else if *request.method() != tiny_http::Method::Post {

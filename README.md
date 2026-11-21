@@ -288,6 +288,7 @@ context-broker-rs
 - **Keeping a remote copy of the vault in step.** `scripts/vault-sync.sh` is a small two-way sync through a git remote: run `vault-sync.sh init <vault> <remote-url>` once on each machine, then `vault-sync.sh <vault>` from a timer. Notes merge line by line and keep both sides' lines; every change stays in the git history.
 - **Allowed addresses.** `CONTEXT_BROKER_HTTP_ALLOW_IPS` (addresses or CIDR ranges, comma separated) refuses every caller whose address is not listed. The caller is the connection's own address; only for a proxy on the same machine (a Cloudflare tunnel) is the `CF-Connecting-IP` header believed instead, so a direct caller cannot claim another address.
 - **Several listen addresses.** `CONTEXT_BROKER_HTTP_ADDR` takes a comma-separated list, for example localhost for the tunnel plus a private-network address for machines on your own network.
+- **Cloudflare Access sign-in.** With `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` and `CONTEXT_BROKER_ACCESS_AUD` set, a caller that Access has signed in is accepted whatever its address: the broker verifies the signed token Access attaches to the request (signature, application, issuer, expiry). A caller then needs a listed address or a valid sign-in.
 - **No sign-in of its own.** Bind it to `127.0.0.1` and publish it only through a proxy that authenticates callers, for example a Cloudflare Tunnel with a Cloudflare Access application in front. Never bind it to a public address.
 
 ---
@@ -306,6 +307,8 @@ All settings are environment variables. Names are shared with the Python broker 
 | `CONTEXT_BROKER_INDEX_MAX_FILE_BYTES` | `2000000` | Skip larger files (`0` disables the limit) |
 | `CONTEXT_BROKER_HTTP_ADDR` | none (stdio) | Serve MCP over HTTP on this address (or comma-separated addresses), for example `127.0.0.1:8765`; requires `CONTEXT_BROKER_PROJECT_ROOT` |
 | `CONTEXT_BROKER_HTTP_ALLOW_IPS` | none | HTTP mode: only these caller addresses or CIDR ranges are served |
+| `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` | none | HTTP mode: your Cloudflare Access team domain, `<team>.cloudflareaccess.com` |
+| `CONTEXT_BROKER_ACCESS_AUD` | none | HTTP mode: the Access application's audience (AUD) tag |
 | `CONTEXT_BROKER_STORAGE` | `json` | Store for chat memory and saved results: `json`, `obsidian`, `graphify` or `auto` |
 | `CONTEXT_BROKER_STORAGE_DIR` | `~/.context-broker` | Where the `json` store lives |
 | `CONTEXT_BROKER_OBSIDIAN_VAULT` | auto-detect | Obsidian vault folder; setting it selects the `obsidian` store |
