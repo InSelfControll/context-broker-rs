@@ -10,7 +10,12 @@ export type Settings = {
   /** 0 turns the timer off. */
   intervalMinutes: number;
   syncOnChange: boolean;
+  /** How many files are compared and transferred at the same time. */
+  parallelFiles: number;
 };
+
+export const DEFAULT_PARALLEL_FILES = 8;
+export const MAX_PARALLEL_FILES = 64;
 
 /** The OAuth client registered for one server, and its tokens while signed in. */
 export type StoredAuth = {
@@ -51,6 +56,7 @@ export function parsePluginData(raw: unknown, defaultDeviceName: string): Plugin
       deviceName: stringField(settings, "deviceName") ?? defaultDeviceName,
       intervalMinutes: Math.max(0, numberField(settings, "intervalMinutes") ?? 5),
       syncOnChange: booleanField(settings, "syncOnChange") ?? true,
+      parallelFiles: Math.min(MAX_PARALLEL_FILES, Math.max(1, Math.round(numberField(settings, "parallelFiles") ?? DEFAULT_PARALLEL_FILES))),
     },
     auth: parseAuth(root["auth"]),
     pendingSignIn: parsePendingSignIn(root["pendingSignIn"]),

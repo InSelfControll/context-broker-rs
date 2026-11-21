@@ -10,7 +10,7 @@ import {
   Setting,
   type TAbstractFile,
 } from "obsidian";
-import { type LastSync, parsePluginData, type PluginData } from "./data";
+import { type LastSync, MAX_PARALLEL_FILES, parsePluginData, type PluginData } from "./data";
 import { isSyncablePath, MassDeletionError, type SyncSummary, syncVault } from "./engine";
 import { errorMessage } from "./guards";
 import {
@@ -28,6 +28,8 @@ import { AuthRequiredError, HttpRemote, serverOrigin, type TokenSource } from ".
 const PROTOCOL_ACTION = "context-broker-sync";
 const CHANGE_DEBOUNCE_MS = 3000;
 const NOTICE_PREFIX = "Context Broker Sync: ";
+const LOG_LIMIT_BYTES = 200_000;
+const LOG_PROGRESS_MS = 5_000;
 const MAX_LISTED_IN_NOTICE = 3;
 
 type SyncStatus =
@@ -46,6 +48,25 @@ export default class ContextBrokerSyncPlugin extends Plugin {
   private syncAgain = false;
   private changeTimer: number | null = null;
   private intervalTimer: number | null = null;
+
+  /**
+   * Appends a line to `sync.log` in the plugin folder. Phones have no developer console, so this
+   * file is how a stalled or failing sync is diagnosed. It is started afresh once it grows large.
+   */
+  private async log(message: string): Promise<void> {
+    const folder = this.manifest.dir;
+    if (folder === undefined) return;
+    const path = `${folder}/sync.log`;
+    try {
+      const adapter = this.app.vault.adapter;
+      const existing = await adapter.stat(path);
+      const line = `${new Date().toISOString()} ${message}\n`;
+      if (existing !== null && existing.size > LOG_LIMIT_BYTES) await adapter.write(path, line);
+      else await adapter.append(path, line);
+    } catch {
+      // Logging must never break a sync.
+    }
+  }
 
   override async onload(): Promise<void> {
     const defaultDeviceName = Platform.isMobile ? "Mobile" : "Desktop";
@@ -264,17 +285,47 @@ export default class ContextBrokerSyncPlugin extends Plugin {
         this.data.syncState = {};
         this.data.stateOrigin = origin;
       }
-      const summary = await syncVault({
-        local: new VaultFileStore(this.app),
-        remote: new HttpRemote(origin, obsidianHttp, this.tokenSource()),
-        state: this.data.syncState,
-        persist: () => this.saveData(this.data),
-        deviceName: this.data.settings.deviceName,
-        allowMassDeletion,
-      });
-      await this.report(summary);
-      return summary.errors.length === 0;
+      // Progress goes to the log every few seconds, with the files in flight, so a sync that
+      // stops moving shows where.
+      const inFlight = new Set<string>();
+      let done = 0;
+      let total = 0;
+      await this.log(`sync started against ${origin}`);
+      const watch = window.setInterval(() => {
+        void this.log(`progress ${done}/${total}; working on: ${[...inFlight].join(" | ") || "nothing"}`);
+      }, LOG_PROGRESS_MS);
+      try {
+        const summary = await syncVault({
+          local: new VaultFileStore(this.app),
+          remote: new HttpRemote(origin, obsidianHttp, this.tokenSource()),
+          state: this.data.syncState,
+          persist: async () => {
+            await this.saveData(this.data);
+          },
+          deviceName: this.data.settings.deviceName,
+          concurrency: this.data.settings.parallelFiles,
+          allowMassDeletion,
+          onPath: (path, phase, count) => {
+            total = count;
+            if (phase === "start") inFlight.add(path);
+            else {
+              inFlight.delete(path);
+              done += 1;
+            }
+          },
+        });
+        await this.log(
+          `sync finished: ${summary.uploaded} uploaded, ${summary.downloaded} downloaded, ` +
+            `${summary.conflicts.length} conflicts, ${summary.errors.length} errors` +
+            summary.errors.slice(0, 5).map((failure) => `; ${failure.path}: ${failure.message}`).join(""),
+        );
+        await this.report(summary);
+        return summary.errors.length === 0;
+      } finally {
+        window.clearInterval(watch);
+      }
     } catch (error) {
+      await this.log(`sync failed: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
       await this.reportFailure(error);
       return false;
     }
@@ -421,6 +472,21 @@ class ContextBrokerSettingTab extends PluginSettingTab {
           const minutes = Number(value);
           if (!Number.isFinite(minutes) || minutes < 0) return;
           settings.intervalMinutes = minutes;
+          save();
+        }),
+      );
+
+    new Setting(containerEl)
+      .setName("Files in parallel")
+      .setDesc(
+        `How many files are compared and transferred at the same time (1 to ${MAX_PARALLEL_FILES}). ` +
+          "Higher is faster on a good connection, especially for the first sync of a large vault; lower it on a slow phone or network.",
+      )
+      .addText((text) =>
+        text.setValue(String(settings.parallelFiles)).onChange((value) => {
+          const count = Math.round(Number(value));
+          if (!Number.isFinite(count) || count < 1 || count > MAX_PARALLEL_FILES) return;
+          settings.parallelFiles = count;
           save();
         }),
       );

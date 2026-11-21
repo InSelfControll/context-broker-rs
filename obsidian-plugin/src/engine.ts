@@ -81,6 +81,8 @@ export type SyncOptions = {
   concurrency?: number;
   /** Set after the user confirms that most of the vault really was deleted on the server. */
   allowMassDeletion?: boolean;
+  /** Told when work on a path starts and ends, so a caller can show progress or find a stall. */
+  onPath?: (path: string, phase: "start" | "end", total: number) => void;
 };
 
 /** The server lists far fewer files than before; deleting locally to match needs confirmation. */
@@ -159,6 +161,7 @@ class SyncRun {
   private readonly claimedPaths = new Set<string>();
   private unsavedChanges = 0;
   private saving: Promise<void> = Promise.resolve();
+  private readonly onPath: SyncOptions["onPath"] | null;
 
   constructor(options: SyncOptions) {
     this.local = options.local;
@@ -169,6 +172,7 @@ class SyncRun {
     this.now = options.now ?? (() => new Date());
     this.concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
     this.allowMassDeletion = options.allowMassDeletion ?? false;
+    this.onPath = options.onPath ?? null;
   }
 
   async run(): Promise<SyncSummary> {
@@ -228,10 +232,13 @@ class SyncRun {
         const path = paths[next];
         next += 1;
         if (path === undefined) return;
+        this.onPath?.(path, "start", paths.length);
         try {
           await this.syncPath(path);
           consecutiveFailures = 0;
+          this.onPath?.(path, "end", paths.length);
         } catch (error) {
+          this.onPath?.(path, "end", paths.length);
           // One file failing must not stop the others; it is reported and retried next run.
           this.summary.errors.push({ path, message: errorMessage(error) });
           consecutiveFailures += 1;
