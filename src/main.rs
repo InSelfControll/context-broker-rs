@@ -5,6 +5,7 @@
 
 mod config;
 mod embed;
+mod graph;
 mod index;
 mod literal;
 mod memory;
@@ -14,7 +15,7 @@ mod snippet;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 #[cfg(target_env = "musl")]
@@ -26,14 +27,17 @@ const DEFAULT_QUERY: &str = "main entry point configuration setup architecture";
 
 struct App {
     engine: index::Engine,
+    graphs: graph::Graphs,
     last_used: Instant,
 }
 
 /// `(name, description, properties, required)` — kept short: every session pays for this list.
-fn tools() -> Vec<(&'static str, &'static str, Value, &'static [&'static str])> {
+type Tool = (&'static str, &'static str, Value, &'static [&'static str]);
+
+fn tools() -> Vec<Tool> {
     let root = || json!({"type": "string", "description": "Project root; auto-detected if omitted"});
     let text = || json!({"type": "string"});
-    vec![
+    let mut list: Vec<Tool> = vec![
         ("search_context", "Semantic code search. Returns the best-matching lines of the top files as plain text with relative paths and @L line markers. Omit query for a project overview.",
             json!({"query": text(), "project_root": root(), "top_k": {"type": "integer", "default": 5}}), &[]),
         ("find_in_codebase", "Exact literal or regex search; returns file, line and snippet. Use for a known symbol or string.",
@@ -56,7 +60,24 @@ fn tools() -> Vec<(&'static str, &'static str, Value, &'static [&'static str])> 
             json!({"query": text(), "filename": text(), "project_root": root(), "top_k": {"type": "integer", "default": 5}}), &["query", "filename"]),
         ("list_saved_results", "List saved search results for the project.", json!({"project_root": root()}), &[]),
         ("load_saved_results", "Load a saved search result.", json!({"filename": text(), "project_root": root()}), &["filename"]),
-    ]
+        ("export_memory", "Copy the stored chat history and saved results into Obsidian or Graphify (auto-detected when target is omitted). Call only when the user asks; repeating it adds nothing.",
+            json!({"target": {"type": "string", "enum": ["obsidian", "graphify"]}, "all_projects": {"type": "boolean", "default": false}, "project_root": root()}), &[]),
+    ];
+    if graph_tool_listed() {
+        list.push(("query_graph", "Graphify knowledge graph: a node's connections, or with `to` the shortest path between two nodes. Use for callers, dependencies and how things connect.",
+            json!({"node": text(), "to": text(), "project_root": root(), "limit": {"type": "integer", "default": 20}}), &["node"]));
+    }
+    list
+}
+
+/// `query_graph` is listed only where it can answer: with Graphify storage, or when the project
+/// the server started in already has a graph. It stays callable either way.
+fn graph_tool_listed() -> bool {
+    static LISTED: OnceLock<bool> = OnceLock::new();
+    *LISTED.get_or_init(|| {
+        project::resolve_root("")
+            .is_ok_and(|root| matches!(config::store(&root), Ok(config::Store::Graphify)) || graph::graph_file(&root).is_file())
+    })
 }
 
 fn tool_list() -> Value {
@@ -155,8 +176,18 @@ fn call(app: &mut App, name: &str, args: &Value) -> Result<Vec<String>, String> 
         }
         "load_cross_session_context" => memory::cross_session(&root, arg(args, "search_query"), arg_usize(args, "top_k", 10))?,
         "lookup_project_history" => memory::history_lookup(&root, arg(args, "query")),
-        "list_saved_results" => memory::list_results(&root),
+        "list_saved_results" => memory::list_results(&root)?,
         "load_saved_results" => memory::load_results(&root, arg(args, "filename"))?,
+        "export_memory" => {
+            memory::export(&root, arg(args, "target"), args.get("all_projects").and_then(Value::as_bool).unwrap_or(false))?
+        }
+        "query_graph" => {
+            let graph = app.graphs.get(&root)?;
+            match arg(args, "to") {
+                "" => graph.explain(arg(args, "node"), arg_usize(args, "limit", 20)),
+                to => graph.path(arg(args, "node"), to),
+            }
+        }
         other => return Err(format!("unknown tool: {other}")),
     };
     let mut blocks = vec![reply];
@@ -213,7 +244,7 @@ fn spawn_idle_release(app: Arc<Mutex<App>>) {
         loop {
             std::thread::sleep(Duration::from_secs(timeout.clamp(1, 30)));
             if let Ok(mut app) = app.try_lock()
-                && app.last_used.elapsed() >= Duration::from_secs(timeout) && app.engine.release() {
+                && app.last_used.elapsed() >= Duration::from_secs(timeout) && (app.engine.release() | app.graphs.release()) {
                     index::trim_memory();
                     eprintln!("[broker] released idle model and index memory");
                 }
@@ -228,7 +259,7 @@ fn main() {
         // SAFETY: no other thread exists yet.
         unsafe { std::env::set_var("RAYON_NUM_THREADS", "1") };
     }
-    let app = Arc::new(Mutex::new(App { engine: index::Engine::default(), last_used: Instant::now() }));
+    let app = Arc::new(Mutex::new(App { engine: index::Engine::default(), graphs: graph::Graphs::default(), last_used: Instant::now() }));
     spawn_idle_release(app.clone());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();

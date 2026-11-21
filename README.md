@@ -4,7 +4,7 @@
 
 **Semantic code search and project memory for AI coding agents, in one 8 MB binary.**
 
-A Rust port of the core of [Context Broker](https://github.com/InSelfControll/context-broker-mcp). It speaks the Model Context Protocol over stdio, finds relevant code by meaning, remembers decisions across sessions, and keeps every reply small: 11 tools, plain-text answers, no telemetry. 100% local, no API keys, no Python, no PyTorch.
+A Rust port of the core of [Context Broker](https://github.com/InSelfControll/context-broker-mcp). It speaks the Model Context Protocol over stdio, finds relevant code by meaning, remembers decisions across sessions, and keeps every reply small: 12 tools, plain-text answers, no telemetry. 100% local, no API keys, no Python, no PyTorch.
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-000000?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg?style=for-the-badge)](LICENSE)
@@ -27,7 +27,7 @@ Every MCP tool you register costs tokens in every session, before the agent has 
 
 | | Python Context Broker | This port |
 |---|---|---|
-| Tool list each session pays for | 36 tools, 3,986 tokens | **11 tools, 1,067 tokens** |
+| Tool list each session pays for | 36 tools, 3,986 tokens | **12 tools, 1,191 tokens** |
 | Average search reply (6 queries) | ~900 tokens | **~660 tokens** |
 | Startup | 0.8 s | **2 ms** |
 | Install | Python env + PyTorch | **one 8 MB binary** |
@@ -56,7 +56,7 @@ Plain text, sent once, with the project root stated a single time and relative p
 <td width="50%">
 
 ### 🧠 Project Memory
-`record_turn` and `record_session` append to a local JSON chat ledger. `load_chat_context`, `load_cross_session_context` and `lookup_project_history` read it back. Search replies add a short "related past work" note when the history strongly matches the query.
+`record_turn` and `record_session` append to a local chat ledger: JSON by default, or notes in an [Obsidian vault](#-storage-backends), or [Graphify](#-storage-backends) memory docs. `load_chat_context`, `load_cross_session_context` and `lookup_project_history` read it back. Search replies add a short "related past work" note when the history strongly matches the query.
 
 ### 🔐 Secrets Never Leave
 Hard-coded filename patterns (`.env`, keys, credentials, ...) and content signatures (`API_KEY=`, `Bearer `, private key headers, ...) keep a file out of indexing, search and snippets. Messages that contain secrets are not recorded.
@@ -168,7 +168,7 @@ Measured on a 235-file repository, against the already-optimized Python server.
 
 | | Python | Rust |
 |---|---|---|
-| Tool list each session pays for | 36 tools, 3,986 tokens | 11 tools, 1,067 tokens |
+| Tool list each session pays for | 36 tools, 3,986 tokens | 12 tools, 1,191 tokens |
 | Average search reply (6 queries) | ~900 tokens | ~660 tokens |
 | Startup | 0.8 s | 2 ms |
 | First search in a new process (index cached) | ~8 s | 78 ms |
@@ -181,7 +181,9 @@ Measured on a 235-file repository, against the already-optimized Python server.
 
 ---
 
-## 🧰 The 11 Tools
+## 🧰 The Tools
+
+Twelve tools are always listed. One more, `query_graph`, is listed when a Graphify graph is available (see [Storage backends](#-storage-backends)).
 
 | Tool | Purpose |
 |------|---------|
@@ -196,6 +198,8 @@ Measured on a 235-file repository, against the already-optimized Python server.
 | [`save_search_results`](docs/tools/save_search_results.md) | Run a semantic search and save the reply under a name. |
 | [`list_saved_results`](docs/tools/list_saved_results.md) | List saved search results. |
 | [`load_saved_results`](docs/tools/load_saved_results.md) | Load a saved search result. |
+| [`export_memory`](docs/tools/export_memory.md) | Copy the stored history and saved results into Obsidian or Graphify. |
+| [`query_graph`](docs/tools/query_graph.md) | Graphify knowledge graph: a node's connections, or the shortest path between two nodes. |
 
 See [docs/TOOLS.md](docs/TOOLS.md) for parameters and example replies.
 
@@ -209,11 +213,13 @@ flowchart LR
     Main --> Search["index.rs<br/>semantic search"]
     Main --> Literal["literal.rs<br/>regex / literal"]
     Main --> Memory["memory.rs<br/>ledger + results"]
+    Main --> Graph["graph.rs<br/>Graphify graph"]
     Search --> Embed["embed.rs<br/>candle MiniLM"]
     Search --> Snip["snippet.rs<br/>line selection"]
     Search --> Files[("Project files")]
     Search --> Cache[("project/.cache/<br/>context-broker-rs")]
-    Memory --> Store[("~/.context-broker")]
+    Memory --> Store[("~/.context-broker,<br/>Obsidian vault or<br/>graphify-out/memory")]
+    Graph --> GraphFile[("project/graphify-out/<br/>graph.json")]
     Main -->|"text blocks<br/>on stdout"| Client
 ```
 
@@ -223,6 +229,46 @@ flowchart LR
 4. **Search.** The query is embedded, scored against every row, and the top files get a query-focused snippet within a token budget.
 
 The details, including diagrams for the request flow and the storage layout, are in [ARCHITECTURE.md](ARCHITECTURE.md).
+
+---
+
+## 🗄️ Storage Backends
+
+Chat memory and saved search results go to one store, chosen with `CONTEXT_BROKER_STORAGE`. The tools and their replies are the same for all three. `auto` picks for you: Obsidian when a vault is configured or found, else Graphify when the project has a `graphify-out/` folder or the `graphify` command is installed, else JSON.
+
+| Store | Where it writes | Format |
+|-------|-----------------|--------|
+| `json` (default) | `~/.context-broker/` | One JSON ledger per session |
+| `obsidian` | The vault's own `AI Chats/` structure when it has one, else `<vault>/Context Broker/<project>-<digest>/` | One Markdown note per session |
+| `graphify` | `<project>/graphify-out/memory/` | One Markdown memory doc per exchange, in the layout of `graphify save-result` |
+
+**Obsidian.** The vault is found automatically from Obsidian's own settings file (native, Flatpak, Snap, macOS and Windows locations): the vault that is open, else the most recently used one. So `CONTEXT_BROKER_STORAGE=obsidian` is enough; set `CONTEXT_BROKER_OBSIDIAN_VAULT` to choose a specific vault (that alone also selects this store). The vault found is logged once to stderr. Anything that syncs the vault, such as Obsidian Sync, carries the notes to your other devices. Notes open and render in Obsidian, can be linked and tagged like any other note, and edits you make there are read back. The broker only touches its own folder inside the vault.
+
+```bash
+claude mcp add -s user context-broker \
+  -e CONTEXT_BROKER_STORAGE=obsidian -- context-broker-rs
+```
+
+**Following the vault.** The broker fits into a vault as it is already organised:
+
+- If the vault files AI chats under `AI Chats/Chats/<platform>/`, the broker does the same. A session becomes `AI Chats/Chats/Context Broker/Context Broker <date> - <session> - <id>.md` with the same front matter as the other chats (`type: ai-chat`, `platform`, `title`, `created`, `updated`, `message_count`, `tags`), numbered `### 01. User — <time>` messages under `## Conversation`, and an entry in `AI Chats/Sources/AI Source - Context Broker.md` and `AI Chats/Projects/AI Project - <project>.md`. Chats imported from other platforms are never modified or read as broker history. Saved results go to `AI Chats/Results/<project>-<digest>/`.
+- Otherwise it uses its own `Context Broker/` folder, placed inside the folder Obsidian is set to use for new notes ("Default location for new notes") when there is one. There each message is a callout.
+
+`CONTEXT_BROKER_OBSIDIAN_LAYOUT=ai-chats` or `broker` overrides the choice.
+
+**Graphify.** [Graphify](https://github.com/Graphify-Labs/graphify) turns a codebase into a knowledge graph in `graphify-out/`. With `CONTEXT_BROKER_STORAGE=graphify`:
+
+- recorded exchanges become memory docs that Graphify folds into the graph on its next update;
+- answers Graphify saved itself (`graphify save-result`) count as project history for `lookup_project_history` and the automatic "related past work" note;
+- `query_graph` reads `graphify-out/graph.json` directly: a node's connections, or the shortest path between two nodes.
+
+`query_graph` is also listed, whatever the store, when the project the server starts in already has a `graphify-out/graph.json`. The broker reads the graph and never builds it: run `/graphify .` in your assistant or `graphify extract .` first. `graphify-out/` is generated output and is left out of semantic search.
+
+**Sending what is already stored.** History recorded in the JSON store is not left behind when you switch. Ask your assistant to export it, and `export_memory` copies every session and saved result of the project (or of all projects) into the vault or into Graphify memory docs, with the original timestamps. It can be repeated: only what is new is added.
+
+The hosted Graphify Cloud graph is an MCP server of its own; connect it next to this one rather than through it: `claude mcp add --transport http graphify https://api.graphify.com/mcp`.
+
+> This project is community-built and is not affiliated with or endorsed by Graphify Labs or Obsidian.
 
 ---
 
@@ -238,7 +284,12 @@ All settings are environment variables. Names are shared with the Python broker 
 | `CONTEXT_BROKER_EMBED_THREADS` | `min(4, cores/2)`, at least 1 | Worker threads for bulk embedding |
 | `CONTEXT_BROKER_IDLE_RESOURCE_TIMEOUT_SECONDS` | `900` | Idle time before the model and indexes are released (`0` disables) |
 | `CONTEXT_BROKER_INDEX_MAX_FILE_BYTES` | `2000000` | Skip larger files (`0` disables the limit) |
-| `CONTEXT_BROKER_STORAGE_DIR` | `~/.context-broker` | Chat ledgers and saved results |
+| `CONTEXT_BROKER_STORAGE` | `json` | Store for chat memory and saved results: `json`, `obsidian`, `graphify` or `auto` |
+| `CONTEXT_BROKER_STORAGE_DIR` | `~/.context-broker` | Where the `json` store lives |
+| `CONTEXT_BROKER_OBSIDIAN_VAULT` | auto-detect | Obsidian vault folder; setting it selects the `obsidian` store |
+| `CONTEXT_BROKER_OBSIDIAN_CONFIG` | standard locations | Obsidian's `obsidian.json`, when it is somewhere unusual |
+| `CONTEXT_BROKER_OBSIDIAN_LAYOUT` | follow the vault | `ai-chats` (the vault's AI-chat structure) or `broker` (the broker's own folder) |
+| `CONTEXT_BROKER_OBSIDIAN_FOLDER` | `Context Broker` | Folder for the broker's notes in the `broker` layout |
 | `CONTEXT_BROKER_MODEL_DIR` | none | Directory with `config.json`, `tokenizer.json`, `model.safetensors` |
 | `CONTEXT_BROKER_MODEL_CACHE_DIR` | `~/.cache/context-broker/models` | Where the model is downloaded once |
 | `HF_HOME` | `~/.cache/huggingface` | Hugging Face cache searched before downloading |
@@ -263,7 +314,7 @@ All settings are environment variables. Names are shared with the Python broker 
 - **Local only.** The only network access is the one-time model download; nothing is sent anywhere afterwards.
 - **Hard-coded secret rules.** `SECRET_FILE_PATTERNS`, `SECRET_KEY_SIGNATURES` and `SECRET_VALUE_SIGNATURES` live in `src/config.rs` and cannot be overridden by configuration or `.gitignore`.
 - **Checked on every read.** The filename check and the content check run when files are collected, indexed, searched and snippeted, so a file that becomes secret-bearing later is dropped at the next change.
-- **Memory is filtered too.** `record_turn` and `record_session` refuse a message containing secret signatures, and history lookups skip exchanges that contain them.
+- **Memory is filtered too.** `record_turn` and `record_session` refuse a message containing secret signatures, and history lookups skip exchanges that contain them. Notes and memory docs can be edited outside the broker, so in the Obsidian and Graphify stores messages with secret signatures are also dropped when read.
 
 ---
 
@@ -278,7 +329,7 @@ Honcho and Redis backends, the web dashboard, task delegation to worker models, 
 | Document | What is in it |
 |----------|---------------|
 | [ARCHITECTURE.md](ARCHITECTURE.md) | Module map, request flow, indexing pipeline, security layers, storage layout, threading |
-| [docs/TOOLS.md](docs/TOOLS.md) | Index of the 11 tools |
+| [docs/TOOLS.md](docs/TOOLS.md) | Index of the tools |
 | [docs/tools/](docs/tools/) | One page per tool with parameters and an example reply |
 | [docs/assets/make_gif.py](docs/assets/make_gif.py) | Generator for the demo GIF |
 

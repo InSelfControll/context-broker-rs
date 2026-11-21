@@ -1,6 +1,8 @@
 //! Settings (environment variables share the Python broker's names) and fixed policy tables.
 
-use std::path::PathBuf;
+use serde_json::Value;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
@@ -34,6 +36,117 @@ pub fn storage_dir() -> PathBuf {
         _ => home().join(".context-broker"),
     }
 }
+/// Where chat memory and saved search results are kept.
+pub enum Store {
+    Json,
+    /// Markdown notes inside this Obsidian vault.
+    Obsidian(PathBuf),
+    /// Graphify memory docs inside the project's `graphify-out/`.
+    Graphify,
+}
+/// The store named by `CONTEXT_BROKER_STORAGE`; see [`resolve_store`].
+pub fn store(root: &Path) -> Result<Store, String> {
+    resolve_store(&std::env::var("CONTEXT_BROKER_STORAGE").unwrap_or_default(), root)
+}
+/// `json` (the default), `obsidian`, `graphify`, or `auto`: Obsidian when a vault is configured or
+/// detected, else Graphify when the project or machine has it, else JSON. Naming a vault with
+/// `CONTEXT_BROKER_OBSIDIAN_VAULT` alone selects Obsidian.
+pub fn resolve_store(kind: &str, root: &Path) -> Result<Store, String> {
+    let kind = kind.trim().to_lowercase();
+    let configured = env_text("CONTEXT_BROKER_OBSIDIAN_VAULT").map(PathBuf::from);
+    let vault = || configured.clone().or_else(detected_vault);
+    match kind.as_str() {
+        "json" => Ok(Store::Json),
+        "graphify" => Ok(Store::Graphify),
+        _ if configured.as_ref().is_some_and(|vault| !vault.is_dir()) => {
+            Err(format!("Obsidian vault not found: {}", configured.expect("checked").display()))
+        }
+        "" => Ok(configured.map_or(Store::Json, Store::Obsidian)),
+        "obsidian" => vault().map(Store::Obsidian).ok_or_else(|| "no Obsidian vault found; set CONTEXT_BROKER_OBSIDIAN_VAULT to the vault folder".into()),
+        "auto" => Ok(match vault() {
+            Some(vault) => Store::Obsidian(vault),
+            None if graphify_detected(root) => Store::Graphify,
+            None => Store::Json,
+        }),
+        other => Err(format!("unknown store '{other}' (use json, obsidian, graphify or auto)")),
+    }
+}
+/// The vault Obsidian itself lists in its settings: the one open now, else the most recently used.
+/// `CONTEXT_BROKER_OBSIDIAN_CONFIG` names the settings file when it is not in a standard place.
+pub fn detected_vault() -> Option<PathBuf> {
+    static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let settings_files: Vec<PathBuf> = match env_text("CONTEXT_BROKER_OBSIDIAN_CONFIG") {
+                Some(file) => vec![PathBuf::from(file)],
+                None => env_text("XDG_CONFIG_HOME")
+                    .map(|dir| PathBuf::from(dir).join("obsidian"))
+                    .into_iter()
+                    .chain(env_text("APPDATA").map(|dir| PathBuf::from(dir).join("obsidian")))
+                    .chain(
+                        [".config/obsidian", ".var/app/md.obsidian.Obsidian/config/obsidian",
+                         "snap/obsidian/current/.config/obsidian", "Library/Application Support/obsidian"]
+                            .map(|dir| home().join(dir)),
+                    )
+                    .map(|dir| dir.join("obsidian.json"))
+                    .collect(),
+            };
+            let mut vaults: Vec<(bool, u64, PathBuf)> = settings_files
+                .iter()
+                .filter_map(|file| serde_json::from_slice::<Value>(&std::fs::read(file).ok()?).ok())
+                .filter_map(|settings| settings.get("vaults")?.as_object().cloned())
+                .flat_map(|vaults| vaults.into_iter().map(|(_, vault)| vault))
+                .filter_map(|vault| {
+                    let path = PathBuf::from(vault.get("path")?.as_str()?);
+                    let open = vault.get("open").and_then(Value::as_bool).unwrap_or(false);
+                    path.is_dir().then(|| (open, vault.get("ts").and_then(Value::as_u64).unwrap_or(0), path))
+                })
+                .collect();
+            vaults.sort();
+            let found = vaults.pop().map(|(_, _, path)| path);
+            if let Some(vault) = &found {
+                eprintln!("[broker] detected Obsidian vault: {}", vault.display());
+            }
+            found
+        })
+        .clone()
+}
+/// Graphify is in use when the project has its output folder or its CLI is installed.
+pub fn graphify_detected(root: &Path) -> bool {
+    static INSTALLED: OnceLock<bool> = OnceLock::new();
+    root.join(GRAPHIFY_OUT).is_dir()
+        || *INSTALLED.get_or_init(|| {
+            std::env::var_os("PATH")
+                .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("graphify").is_file() || dir.join("graphify.exe").is_file()))
+        })
+}
+fn env_text(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.trim().is_empty())
+}
+/// True when notes follow the vault's existing AI-chat convention (`AI Chats/Chats/<platform>/`,
+/// `type: ai-chat` notes, Source and Project index notes) instead of the broker's own folder.
+/// `CONTEXT_BROKER_OBSIDIAN_LAYOUT` forces `ai-chats` or `broker`; otherwise the vault decides.
+pub fn obsidian_ai_chats(vault: &Path) -> bool {
+    match env_text("CONTEXT_BROKER_OBSIDIAN_LAYOUT").unwrap_or_default().trim().to_lowercase().as_str() {
+        "ai-chats" => true,
+        "broker" => false,
+        _ => vault.join(AI_CHATS).join("Chats").is_dir(),
+    }
+}
+/// Where the vault puts new notes: the folder chosen in Obsidian's "Default location for new
+/// notes" setting, else the vault itself.
+pub fn obsidian_new_notes(vault: &Path) -> PathBuf {
+    let settings: Option<Value> = std::fs::read(vault.join(".obsidian").join("app.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let folder = settings.as_ref().filter(|app| app["newFileLocation"] == "folder").and_then(|app| app["newFileFolderPath"].as_str());
+    match folder.map(|folder| folder.trim_matches('/')).filter(|folder| !folder.is_empty() && !folder.contains("..")) {
+        Some(folder) => vault.join(folder),
+        None => vault.to_path_buf(),
+    }
+}
+/// Folder inside the vault that holds the broker's notes.
+pub fn obsidian_folder() -> String {
+    std::env::var("CONTEXT_BROKER_OBSIDIAN_FOLDER").ok().filter(|v| !v.trim().is_empty()).unwrap_or_else(|| "Context Broker".into())
+}
 /// Where the ONNX embedding model is downloaded once and reused.
 pub fn model_cache_dir() -> PathBuf {
     match std::env::var("CONTEXT_BROKER_MODEL_CACHE_DIR") {
@@ -52,6 +165,10 @@ pub const EMBED_MAX_CHARS: usize = 3_000;
 /// Texts per inference batch (small batches run in parallel worker threads).
 pub const EMBED_BATCH: usize = 8;
 pub const IN_PROJECT_FOLDER: &str = ".context-broker";
+/// Graphify's output folder inside a project (graph, report, memory docs).
+pub const GRAPHIFY_OUT: &str = "graphify-out";
+/// Root folder of the AI-chat convention in an Obsidian vault.
+pub const AI_CHATS: &str = "AI Chats";
 
 pub const SUPPORTED_EXTENSIONS: &[&str] = &[
     "md", "json", "toml", "yaml", "yml", "xml", "properties", "gradle", "go", "py", "ts", "js", "rs",
@@ -84,7 +201,7 @@ pub const IGNORE_DIRS: &[&str] = &[
     "__pycache__", ".venv", ".uv", ".tox", ".pytest_cache", ".mypy_cache", ".coverage", "htmlcov",
     ".eggs", "venv", "env", ".env", "node_modules", ".next", ".nuxt", "dist", "build", ".output",
     ".git", ".svn", ".hg", "target", "bin", "out", ".gradle", ".idea", ".vscode", ".vs", ".settings",
-    "result", "result-bin", "result-dev", "result-man", "result-lib", ".cache", ".context-broker",
+    "result", "result-bin", "result-dev", "result-man", "result-lib", ".cache", ".context-broker", "graphify-out", ".obsidian",
     "coverage", "tmp", "temp", "logs",
 ];
 
