@@ -316,6 +316,7 @@ export default class ContextBrokerSyncPlugin extends Plugin {
         });
         await this.log(
           `sync finished: ${summary.uploaded} uploaded, ${summary.downloaded} downloaded, ` +
+            `${summary.deletedRemote} deleted on the server, ${summary.deletedLocal} deleted here, ` +
             `${summary.conflicts.length} conflicts, ${summary.errors.length} errors` +
             summary.errors.slice(0, 5).map((failure) => `; ${failure.path}: ${failure.message}`).join(""),
         );
@@ -332,11 +333,20 @@ export default class ContextBrokerSyncPlugin extends Plugin {
   }
 
   private async report(summary: SyncSummary): Promise<void> {
-    const deleted = summary.deletedLocal + summary.deletedRemote;
-    const text =
-      `${summary.uploaded} uploaded, ${summary.downloaded} downloaded, ${deleted} deleted, ` +
-      `${summary.conflicts.length} conflicts, ${summary.errors.length} errors`;
+    // Only what happened is listed: a run that had nothing to do says so instead of a row of zeros.
+    const parts = [
+      [summary.uploaded, "uploaded"],
+      [summary.downloaded, "downloaded"],
+      [summary.deletedRemote, "deleted on the server"],
+      [summary.deletedLocal, "deleted here"],
+      [summary.conflicts.length, "conflicts kept as copies"],
+      [summary.errors.length, "errors"],
+    ] as const;
+    const happened = parts.filter(([count]) => count > 0).map(([count, label]) => `${count} ${label}`);
+    const tracked = Object.keys(this.data.syncState).length;
+    const text = happened.length === 0 ? `Up to date, ${tracked} files in sync` : happened.join(", ");
     const ok = summary.errors.length === 0;
+    if (happened.length > 0) this.data.lastChange = { at: Date.now(), ok, text };
     await this.finish({ at: Date.now(), ok, text });
 
     if (summary.conflicts.length > 0) {
@@ -365,6 +375,7 @@ export default class ContextBrokerSyncPlugin extends Plugin {
 
   private async finish(lastSync: LastSync): Promise<void> {
     this.data.lastSync = lastSync;
+    this.settingTab?.refreshStatus();
     this.setStatus(
       lastSync.ok ? { kind: "synced", at: lastSync.at } : { kind: "error", message: lastSync.text },
     );
@@ -424,6 +435,8 @@ function listed(lines: string[]): string {
 
 class ContextBrokerSettingTab extends PluginSettingTab {
   private readonly plugin: ContextBrokerSyncPlugin;
+  private lastSyncRow: Setting | null = null;
+  private lastChangeRow: Setting | null = null;
 
   constructor(app: App, plugin: ContextBrokerSyncPlugin) {
     super(app, plugin);
@@ -522,14 +535,26 @@ class ContextBrokerSettingTab extends PluginSettingTab {
         }),
       );
 
-    const lastSync = plugin.pluginData.lastSync;
-    new Setting(containerEl)
+    this.lastSyncRow = new Setting(containerEl)
       .setName("Last sync")
-      .setDesc(
-        lastSync === null
-          ? "Never."
-          : `${new Date(lastSync.at).toLocaleString()}: ${lastSync.text}`,
-      )
       .addButton((button) => button.setButtonText("Sync now").onClick(() => plugin.syncNow()));
+    this.lastChangeRow = new Setting(containerEl).setName("Last change");
+    this.refreshStatus();
+  }
+
+  override hide(): void {
+    this.lastSyncRow = null;
+    this.lastChangeRow = null;
+  }
+
+  /** Updates the two result rows in place, so the tab shows a sync that finishes while it is open. */
+  refreshStatus(): void {
+    const { lastSync, lastChange } = this.plugin.pluginData;
+    const line = (entry: LastSync | null, never: string): string =>
+      entry === null ? never : `${new Date(entry.at).toLocaleString()}: ${entry.text}`;
+    this.lastSyncRow?.setDesc(line(lastSync, "Never."));
+    this.lastChangeRow?.setDesc(
+      line(lastChange, "Nothing has needed transferring since this was installed."),
+    );
   }
 }

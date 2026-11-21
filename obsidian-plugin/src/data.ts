@@ -44,6 +44,8 @@ export type PluginData = {
   stateOrigin: string;
   syncState: SyncState;
   lastSync: LastSync | null;
+  /** The most recent run that actually moved something, so it is not hidden by later idle runs. */
+  lastChange: LastSync | null;
 };
 
 /** Reads the saved data file, falling back to defaults for anything missing or malformed. */
@@ -63,6 +65,7 @@ export function parsePluginData(raw: unknown, defaultDeviceName: string): Plugin
     stateOrigin: stringField(root, "stateOrigin") ?? "",
     syncState: parseSyncState(root["syncState"]),
     lastSync: parseLastSync(root["lastSync"]),
+    lastChange: parseLastSync(root["lastChange"]),
   };
 }
 
