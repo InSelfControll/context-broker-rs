@@ -7,7 +7,7 @@
 A Rust port of the core of [Context Broker](https://github.com/InSelfControll/context-broker-mcp). It speaks the Model Context Protocol over stdio, finds relevant code by meaning, remembers decisions across sessions, and keeps every reply small: 12 tools, plain-text answers, no telemetry. 100% local, no API keys, no Python, no PyTorch.
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-000000?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
-[![License: Elastic 2.0](https://img.shields.io/badge/License-Elastic--2.0-blue.svg?style=for-the-badge)](LICENSE)
+[![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg?style=for-the-badge)](LICENSE)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-green?style=for-the-badge)](https://modelcontextprotocol.io)
 [![Transport](https://img.shields.io/badge/Transport-stdio-lightgrey?style=for-the-badge)](#-quick-start)
 
@@ -377,8 +377,10 @@ To rebuild the demo GIF: `uv run --with pillow python docs/assets/make_gif.py`.
 
 ## License
 
-[Elastic License 2.0](LICENSE) © 2026 Ofir (InSelfControll)
+[PolyForm Noncommercial 1.0.0](LICENSE) © 2026 Ofir (InSelfControll)
 
-In short: you may use, copy, modify and redistribute this software, including inside a company. You may **not** offer it to others as a hosted or managed service, and you may not remove or obscure the licensing notices. This summary is not the license; the [LICENSE](LICENSE) file is.
+In short: you may use, copy, modify and share this software for **noncommercial** purposes: personal use, study, hobby projects, and use by charities, schools and public bodies.
 
-Versions up to and including v0.4.0 were published under the MIT License, which continues to apply to those versions.
+**Commercial use needs the author's approval first.** That includes selling the software, selling services built on or delivered with it, offering it as a hosted or managed service, and using it inside a for-profit business. To ask, [open an issue](https://github.com/InSelfControll/context-broker-rs/issues); permission is given case by case, in writing.
+
+This summary is not the license; the [LICENSE](LICENSE) file is. Versions up to and including v0.4.0 were published under the MIT License, which continues to apply to those versions.
