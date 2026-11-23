@@ -16,7 +16,7 @@ candle-nn = "0.11.1"
 candle-transformers = "0.11.1"
 globset = "0.4.21"
 ignore = "0.4.34"
-jsonwebtoken = "10.3.0"
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto", "use_pem"] }
 libc = "0.2.191"
 regex = "1.13.2"
 serde = { version = "1.0.229", features = ["derive"] }
