@@ -18,6 +18,21 @@ usage() {
 log() { printf '[vault-sync] %s\n' "$*" >&2; }
 
 readonly BRANCH=main
+# Plugin and app state that holds credentials (OAuth tokens, API keys) is never committed, even
+# when the vault's own .gitignore would let it through: .git/info/exclude applies regardless.
+readonly PRIVATE_PATTERNS=('.obsidian/plugins/*/data.json' '.obsidian/plugins/*/sync.log')
+
+# Make sure the private patterns are excluded and no longer tracked.
+keep_private() {
+  local exclude=.git/info/exclude pattern
+  mkdir -p .git/info
+  touch "$exclude"
+  for pattern in "${PRIVATE_PATTERNS[@]}"; do
+    grep -qxF -- "$pattern" "$exclude" || printf '%s\n' "$pattern" >> "$exclude"
+  done
+  # Files committed by an earlier version stop being tracked (they stay on disk).
+  git rm -r -q --cached --ignore-unmatch -- "${PRIVATE_PATTERNS[@]}" >/dev/null
+}
 
 init() {
   local vault=$1 remote=${2:-}
@@ -30,6 +45,7 @@ init() {
   [[ -f .gitattributes ]] || printf '*.md merge=union\n' > .gitattributes
   # Per-machine Obsidian state and sync leftovers are not content.
   [[ -f .gitignore ]] || printf '%s\n' '.obsidian/workspace*.json' '.obsidian/cache' '.trash/' '*.lock' '*.tmp[0-9]*' > .gitignore
+  keep_private
   if [[ -n $remote ]]; then
     if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin "$remote"; else git remote add origin "$remote"; fi
   fi
@@ -44,6 +60,7 @@ sync() {
   exec 9> .git/vault-sync.lock
   flock -n 9 || { log "another sync is running"; exit 0; }
 
+  keep_private
   git add -A
   if ! git diff --cached --quiet; then
     git commit -q -m "sync: $(uname -n) $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -253,10 +253,26 @@ fn message_heading() -> &'static Regex {
     RX.get_or_init(|| Regex::new(r"^(\\*)### \d+\. (User|Assistant) — ").expect("valid regex"))
 }
 
-/// The note of a session, found by the id that ends its name.
+/// The id that ends a session's note name: 128 bits of the project and session, so a caller
+/// cannot search out a session id that lands on another project's note.
+fn ai_chat_suffix(root: &Path, session: &str) -> String {
+    sha256_hex(&format!("{}/{session}", project_digest(root)))[..32].to_string()
+}
+
+/// The note of a session, found by the id that ends its name. Notes from earlier versions end
+/// in a short 32-bit id that can be forced to collide, so one of those is used only when its
+/// front matter names this very project and session.
 fn ai_chat_note(vault: &Path, root: &Path, session: &str) -> Option<PathBuf> {
-    let ending = format!(" - {}.md", &sha256_hex(&format!("{}/{session}", project_digest(root)))[..8]);
-    std::fs::read_dir(ai_chats_dir(vault)).ok()?.flatten().map(|entry| entry.path()).find(|path| path.to_string_lossy().ends_with(&ending))
+    let notes: Vec<PathBuf> = std::fs::read_dir(ai_chats_dir(vault)).ok()?.flatten().map(|entry| entry.path()).collect();
+    let suffix = ai_chat_suffix(root, session);
+    let ends = |path: &PathBuf, id: &str| path.to_string_lossy().ends_with(&format!(" - {id}.md"));
+    let conversation = format!("{}/{session}", project_digest(root));
+    notes.iter().find(|path| ends(path, &suffix)).cloned().or_else(|| {
+        notes.iter().find(|path| {
+            ends(path, &suffix[..8])
+                && std::fs::read_to_string(path).is_ok_and(|text| front_matter(&text).0.get("conversation_id") == Some(&conversation))
+        }).cloned()
+    })
 }
 
 fn heading_messages(body: &str) -> Vec<(String, String)> {
@@ -309,7 +325,7 @@ fn record_ai_chat(vault: &Path, root: &Path, session: &str, exchanges: &[Exchang
     let source_link = format!("[[AI Source - {PLATFORM}]]");
     let existing = ai_chat_note(vault, root, session);
     let path = existing.clone().unwrap_or_else(|| {
-        dir.join(format!("{PLATFORM} {} - {session} - {}.md", &created[..10], &sha256_hex(&format!("{}/{session}", project_digest(root)))[..8]))
+        dir.join(format!("{PLATFORM} {} - {session} - {}.md", &created[..10], ai_chat_suffix(root, session)))
     });
     with_lock(&path, || {
         let note = match &existing {
@@ -977,4 +993,37 @@ pub fn export(root: &Path, target: &str, all_projects: bool) -> Result<String, S
         reply.push_str(&format!(" {missing} stored project(s) skipped: folder no longer exists."));
     }
     Ok(reply)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chat_notes_need_the_full_id_or_matching_front_matter() {
+        let base = std::env::temp_dir().join(format!("context-broker-notes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (vault, root) = (base.join("vault"), base.join("project"));
+        std::fs::create_dir_all(ai_chats_dir(&vault)).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let note = |name: &str, conversation: &str| {
+            let path = ai_chats_dir(&vault).join(name);
+            std::fs::write(&path, format!("---\ntype: ai-chat\nconversation_id: \"{conversation}\"\n---\n\n## Conversation\n")).unwrap();
+            path
+        };
+        let suffix = ai_chat_suffix(&root, "s1");
+        assert_eq!(suffix.len(), 32);
+        // An old-style note whose short id matches, but which belongs to another conversation:
+        // what a caller who forced a 32-bit collision would land on.
+        let foreign = note(&format!("Context Broker 2026-01-01 - other - {}.md", &suffix[..8]), "someone-else/victim");
+        assert_eq!(ai_chat_note(&vault, &root, "s1"), None);
+        // The same short id with this project's own conversation is a genuine older note.
+        std::fs::remove_file(foreign).unwrap();
+        let legacy = note(&format!("Context Broker 2026-01-01 - s1 - {}.md", &suffix[..8]), &format!("{}/s1", project_digest(&root)));
+        assert_eq!(ai_chat_note(&vault, &root, "s1"), Some(legacy));
+        // A current note is found by its full id.
+        let current = note(&format!("Context Broker 2026-02-01 - s1 - {suffix}.md"), &format!("{}/s1", project_digest(&root)));
+        assert_eq!(ai_chat_note(&vault, &root, "s1"), Some(current));
+        std::fs::remove_dir_all(base).unwrap();
+    }
 }

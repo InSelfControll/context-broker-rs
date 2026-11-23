@@ -9,7 +9,7 @@ Call it only when the user asks. It can be repeated: messages and results alread
 | Name | Type | Required | Default |
 |------|------|----------|---------|
 | `target` | `obsidian` or `graphify` | no | detected: a vault if one is configured or found, else Graphify if the project has `graphify-out/` or the CLI is installed |
-| `all_projects` | boolean | no | `false` (only this project) |
+| `all_projects` | boolean | no | `false` (only this project); refused over HTTP, where the server is confined to one folder |
 | `project_root` | string | no | auto-detected |
 
 ## Where it goes

@@ -60,7 +60,8 @@ WantedBy=multi-user.target
 ```
 
 - `CONTEXT_BROKER_PROJECT_ROOT` is required in HTTP mode. Every call is confined to it; a
-  `project_root` argument pointing elsewhere is refused.
+  `project_root` argument pointing elsewhere, or at a hidden folder inside it (`.git`, `.ssh`,
+  `.context-broker`), is refused, and `export_memory` with `all_projects` is not available.
 - `CONTEXT_BROKER_OBSIDIAN_VAULT` makes memory tools write notes into the vault. Leave it out to
   keep memory in the JSON store.
 - The first search downloads the embedding model once and indexes the folder. On a small server a

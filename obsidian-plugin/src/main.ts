@@ -21,6 +21,7 @@ import {
   OAuthError,
   refreshTokens,
   registerClient,
+  type TokenSet,
 } from "./oauth";
 import { obsidianHttp, VaultFileStore } from "./obsidian-io";
 import { AuthRequiredError, HttpRemote, serverOrigin, type TokenSource } from "./remote";
@@ -31,6 +32,32 @@ const NOTICE_PREFIX = "Context Broker Sync: ";
 const LOG_LIMIT_BYTES = 200_000;
 const LOG_PROGRESS_MS = 5_000;
 const MAX_LISTED_IN_NOTICE = 3;
+/** Where the OAuth tokens are kept when the app has secret storage (Obsidian 1.11.4+). */
+const TOKENS_SECRET_ID = "context-broker-sync-tokens";
+
+type SecretStore = { getSecret(id: string): string | null; setSecret(id: string, secret: string): void };
+
+/** The app's secret storage, which lives outside the vault; null on apps older than 1.11.4. */
+function secretStore(app: App): SecretStore | null {
+  const store: unknown = (app as { secretStorage?: unknown }).secretStorage;
+  if (typeof store !== "object" || store === null) return null;
+  const candidate = store as Partial<SecretStore>;
+  return typeof candidate.getSecret === "function" && typeof candidate.setSecret === "function" ? (store as SecretStore) : null;
+}
+
+/** Tokens read back from secret storage; null when absent or unreadable. */
+function parseStoredTokens(text: string | null): TokenSet | null {
+  if (text === null || text === "") return null;
+  try {
+    const value: unknown = JSON.parse(text);
+    if (typeof value !== "object" || value === null) return null;
+    const { accessToken, refreshToken } = value as Record<string, unknown>;
+    if (typeof accessToken !== "string") return null;
+    return { accessToken, refreshToken: typeof refreshToken === "string" ? refreshToken : null };
+  } catch {
+    return null;
+  }
+}
 
 type SyncStatus =
   | { kind: "idle" }
@@ -71,6 +98,13 @@ export default class ContextBrokerSyncPlugin extends Plugin {
   override async onload(): Promise<void> {
     const defaultDeviceName = Platform.isMobile ? "Mobile" : "Desktop";
     this.data = parsePluginData(await this.loadData(), defaultDeviceName);
+    const secrets = secretStore(this.app);
+    if (secrets !== null && this.data.auth !== null) {
+      // Tokens live in the app's secret storage; data.json (inside the vault, so copied by git
+      // or any other vault sync) keeps only the client registration. Tokens an older version
+      // left in data.json move over on the next save.
+      this.data.auth.tokens ??= parseStoredTokens(secrets.getSecret(TOKENS_SECRET_ID));
+    }
 
     this.statusBar = this.addStatusBarItem();
     if (this.data.lastSync?.ok === true) this.status = { kind: "synced", at: this.data.lastSync.at };
@@ -105,12 +139,26 @@ export default class ContextBrokerSyncPlugin extends Plugin {
     });
   }
 
+  /** Writes data.json without the tokens whenever the app can keep them in secret storage. */
+  override async saveData(data: PluginData): Promise<void> {
+    const secrets = secretStore(this.app);
+    if (secrets === null) return super.saveData(data);
+    const tokens = data.auth?.tokens ?? null;
+    secrets.setSecret(TOKENS_SECRET_ID, tokens === null ? "" : JSON.stringify(tokens));
+    return super.saveData({ ...data, auth: data.auth === null ? null : { ...data.auth, tokens: null } });
+  }
+
   get pluginData(): PluginData {
     return this.data;
   }
 
   get signedIn(): boolean {
-    return this.currentTokens() !== null;
+    try {
+      return this.currentTokens(serverOrigin(this.data.settings.serverUrl)) !== null;
+    } catch (error) {
+      if (error instanceof TypeError) return false;
+      throw error;
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -191,26 +239,24 @@ export default class ContextBrokerSyncPlugin extends Plugin {
     }
   }
 
-  private currentTokens(): { accessToken: string; refreshToken: string | null } | null {
+  /**
+   * The tokens for requests that go to `destination`. Tokens issued for one server are never
+   * sent to another: the check is against where the request actually goes, so a sync still
+   * running against an old server never picks up tokens when the setting changes mid-run.
+   */
+  private currentTokens(destination: string): { accessToken: string; refreshToken: string | null } | null {
     const auth = this.data.auth;
     if (auth === null || auth.tokens === null) return null;
-    let origin: string;
-    try {
-      origin = serverOrigin(this.data.settings.serverUrl);
-    } catch (error) {
-      if (error instanceof TypeError) return null;
-      throw error;
-    }
-    // Tokens issued for one server are never sent to another.
-    return auth.origin === origin ? auth.tokens : null;
+    return auth.origin === destination ? auth.tokens : null;
   }
 
-  private tokenSource(): TokenSource {
+  /** Tokens for one destination origin, the same one the `HttpRemote` sends to. */
+  private tokenSource(destination: string): TokenSource {
     return {
-      accessToken: () => this.currentTokens()?.accessToken ?? null,
+      accessToken: () => this.currentTokens(destination)?.accessToken ?? null,
       refresh: async () => {
         const auth = this.data.auth;
-        const refreshToken = this.currentTokens()?.refreshToken ?? null;
+        const refreshToken = this.currentTokens(destination)?.refreshToken ?? null;
         if (auth === null || refreshToken === null) return null;
         try {
           auth.tokens = await refreshTokens(
@@ -297,7 +343,7 @@ export default class ContextBrokerSyncPlugin extends Plugin {
       try {
         const summary = await syncVault({
           local: new VaultFileStore(this.app),
-          remote: new HttpRemote(origin, obsidianHttp, this.tokenSource()),
+          remote: new HttpRemote(origin, obsidianHttp, this.tokenSource(origin)),
           state: this.data.syncState,
           persist: async () => {
             await this.saveData(this.data);

@@ -584,8 +584,20 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
         let (text, is_error) = call("read_file", json!({"path": blocked}));
         assert!(is_error && !text.contains("example.com") && !text.contains(&token), "{blocked}: {text}");
     }
+    // Nor by naming the private folder itself as the project root.
+    for (sub_root, path) in [(".git", "config"), ("./.git", "config"), ("src/../.git", "config")] {
+        let (text, is_error) = call("read_file", json!({"project_root": sub_root, "path": path}));
+        assert!(is_error && !text.contains("example.com"), "{sub_root}/{path}: {text}");
+    }
+    let (text, is_error) = call("search_context", json!({"query": "remote origin", "project_root": ".git"}));
+    assert!(is_error && text.contains("hidden folder"), "{text}");
+    let (_, is_error) = call("read_file", json!({"project_root": "src", "path": "billing.py"}));
+    assert!(!is_error, "an ordinary sub-folder still works as a root");
     std::fs::remove_dir_all(root.join(".git")).unwrap();
     std::fs::remove_file(root.join("src/client.js")).unwrap();
+    // Exporting every project's memory would reach past the served folder.
+    let (text, is_error) = call("export_memory", json!({"target": "obsidian", "all_projects": true}));
+    assert!(is_error && text.contains("all_projects"), "{text}");
 
     // Browsers: a page from another site (CSRF) or a DNS name pointed at this machine (DNS
     // rebinding) is refused; the Obsidian apps and local pages are not.

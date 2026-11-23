@@ -87,7 +87,9 @@ const MAX_READ_REPLY_CHARS: usize = 12_000;
 fn read_file(root: &std::path::Path, path: &str, start_line: usize, max_lines: usize) -> Result<String, String> {
     let file = project::inside(root, path)?;
     let rel = project::relative(root, &file);
-    if rel.split('/').any(|part| config::PRIVATE_DIRS.contains(&part)) {
+    // Judged from the served folder, whatever sub-folder the caller chose as project_root.
+    let served = project::locked_root().unwrap_or(root);
+    if project::relative(served, &file).split('/').any(|part| config::PRIVATE_DIRS.contains(&part)) {
         return Err(format!("cannot read {rel}: private folder"));
     }
     let content = project::read_safe(root, &file, MAX_READ_CHARS).filter(|_| file.is_file()).ok_or_else(|| format!("cannot read {rel}: missing, binary or blocked as secret-bearing"))?;
@@ -215,7 +217,12 @@ fn call(app: &mut App, name: &str, args: &Value) -> Result<Vec<String>, String> 
         "load_saved_results" => memory::load_results(&root, arg(args, "filename"))?,
         "read_file" => read_file(&root, arg(args, "path"), arg_usize(args, "start_line", 1), arg_usize(args, "max_lines", 200))?,
         "export_memory" => {
-            memory::export(&root, arg(args, "target"), args.get("all_projects").and_then(Value::as_bool).unwrap_or(false))?
+            let all_projects = args.get("all_projects").and_then(Value::as_bool).unwrap_or(false);
+            // Remote callers are confined to the served folder; other projects are out of reach.
+            if all_projects && project::locked_root().is_some() {
+                return Err("all_projects is not available over HTTP: the server is confined to one folder".into());
+            }
+            memory::export(&root, arg(args, "target"), all_projects)?
         }
         "query_graph" => {
             let graph = app.graphs.get(&root)?;

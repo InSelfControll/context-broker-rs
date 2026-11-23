@@ -27,6 +27,26 @@ fn key_assignment() -> &'static Regex {
     })
 }
 
+/// `NAME = "literal"` with a secret-like name, in the forms code and config files use: spaces
+/// around the operator, a declaration keyword, a type annotation (`const API_KEY: string = "..."`,
+/// `SECRET_KEY = '...'`, `password = "..."`). Only a quoted literal counts, so `token = make()`
+/// stays readable; group 1 is the value.
+fn quoted_assignment() -> &'static Regex {
+    static RX: OnceLock<Regex> = OnceLock::new();
+    RX.get_or_init(|| {
+        let names = SECRET_KEY_SIGNATURES.join("|");
+        Regex::new(&format!(
+            r#"(?i)^\s*(?:(?:export|const|let|var|val|static|final|public|private|protected|readonly|pub|my|our|local|set)\s+)*\$?["']?[\w.\-]*(?:{names})[\w.\-]*["']?(?:\s*:\s*[\w<>\[\]?|.&']+)?\s*(?::=|=>|=|:)\s*[bru]?["']([^"'\s]{{8,}})["']"#
+        ))
+        .expect("valid secret regex")
+    })
+}
+
+/// A literal that looks like a credential rather than a word: it has a digit, or is long.
+fn credential_like(value: &str) -> bool {
+    value.len() >= 20 || value.chars().any(|c| c.is_ascii_digit())
+}
+
 /// Well-known credential formats (cloud keys, personal access tokens, API keys).
 fn token_formats() -> &'static Regex {
     static RX: OnceLock<Regex> = OnceLock::new();
@@ -40,14 +60,61 @@ pub fn is_secret_path(rel_path: &str) -> bool {
     file_patterns().is_match(base) || file_patterns().is_match(&rel)
 }
 
-/// True when any line of `content` carries a secret signature.
+/// True when any line of `content` carries a secret signature. Comment lines are still checked
+/// for real key material (a commented-out token is still a token); only the name-based
+/// assignment checks skip them, so prose like `# set API_KEY=...` in docs stays readable.
 pub fn has_secret_content(content: &str) -> bool {
     content.lines().any(|line| {
         let stripped = line.trim();
-        !stripped.is_empty()
-            && !stripped.starts_with('#')
-            && (SECRET_VALUE_SIGNATURES.iter().any(|sig| stripped.contains(sig))
-                || key_assignment().is_match(line)
-                || token_formats().is_match(line))
+        if stripped.is_empty() {
+            return false;
+        }
+        if SECRET_VALUE_SIGNATURES.iter().any(|sig| stripped.contains(sig)) || token_formats().is_match(line) {
+            return true;
+        }
+        let comment = stripped.starts_with('#') || stripped.starts_with("//");
+        !comment
+            && (key_assignment().is_match(line)
+                || quoted_assignment().captures(line).is_some_and(|found| credential_like(&found[1])))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_secret_content;
+
+    #[test]
+    fn detects_common_credential_forms() {
+        // Every credential-shaped value is built at run time, so the source holds no literal that
+        // a secret scanner would rightly flag.
+        let value = "q7".repeat(6);
+        let token = format!("ghp_{}", "a1".repeat(18));
+        let cases = [
+            format!("SECRET_KEY = 'django-insecure-{value}'"),
+            format!("password = \"{value}\""),
+            format!("const API_KEY = \"{value}\";"),
+            format!("export const authToken: string = '{value}';"),
+            format!("    db_password: \"{value}\""),
+            format!("# GITHUB_TOKEN={token}"),
+            format!("// fallback: {token}"),
+            format!("API_KEY={value}"),
+        ];
+        for secret in &cases {
+            assert!(has_secret_content(secret), "missed: {secret}");
+        }
+    }
+
+    #[test]
+    fn leaves_ordinary_code_readable() {
+        for line in [
+            "token = make_token()",
+            "let token = parse(input);",
+            "# set API_KEY=... in your shell",
+            "// password = \"<your password>\" is only an example",
+            "const TOKEN_KIND = \"identifier\";",
+            "def login_user(name, password_hash):",
+        ] {
+            assert!(!has_secret_content(line), "blocked: {line}");
+        }
+    }
 }
