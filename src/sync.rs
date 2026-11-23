@@ -49,6 +49,12 @@ impl Sync {
         (parts.iter().all(fine) && !is_scratch(parts.last()?)).then(|| parts.iter().fold(self.root.clone(), |path, part| path.join(part)))
     }
 
+    /// True when the nearest existing folder above `path` really lies inside the root, so a
+    /// symlinked folder cannot lead a read, write or delete out of the project.
+    fn contained(&self, path: &Path) -> bool {
+        path.ancestors().skip(1).find(|dir| std::fs::symlink_metadata(dir).is_ok()).and_then(|dir| dir.canonicalize().ok()).is_some_and(|real| real.starts_with(&self.root))
+    }
+
     /// Hash of a regular file within the size limit; `None` when absent, a symlink or too large.
     fn hash_of(&self, relative: &str, path: &Path) -> Option<(String, u64, u64)> {
         let meta = std::fs::symlink_metadata(path).ok().filter(|meta| meta.is_file() && meta.len() <= MAX_FILE_BYTES)?;
@@ -85,7 +91,7 @@ impl Sync {
     }
 
     pub fn read(&self, relative: &str) -> Reply {
-        let Some(path) = self.locate(relative) else { return Reply::Json(400, json!({"error": "bad path"})) };
+        let Some(path) = self.locate(relative).filter(|path| self.contained(path)) else { return Reply::Json(400, json!({"error": "bad path"})) };
         match self.hash_of(relative, &path).and_then(|(hash, ..)| Some((std::fs::read(&path).ok()?, hash))) {
             Some((bytes, hash)) => Reply::File(bytes, hash),
             None => Reply::Json(404, json!({"error": "not found"})),
@@ -94,7 +100,7 @@ impl Sync {
 
     /// Write `body` if the server still has what the caller last saw (`base`, empty for "no file").
     pub fn write(&self, relative: &str, base: &str, body: &[u8]) -> Reply {
-        let Some(path) = self.locate(relative) else { return Reply::Json(400, json!({"error": "bad path"})) };
+        let Some(path) = self.locate(relative).filter(|path| self.contained(path)) else { return Reply::Json(400, json!({"error": "bad path"})) };
         let current = self.hash_of(relative, &path).map(|(hash, ..)| hash).unwrap_or_default();
         let incoming = sha256(body);
         if current != base && current != incoming {
@@ -116,7 +122,7 @@ impl Sync {
     }
 
     pub fn delete(&self, relative: &str, base: &str) -> Reply {
-        let Some(path) = self.locate(relative) else { return Reply::Json(400, json!({"error": "bad path"})) };
+        let Some(path) = self.locate(relative).filter(|path| self.contained(path)) else { return Reply::Json(400, json!({"error": "bad path"})) };
         match self.hash_of(relative, &path) {
             None => Reply::Json(200, json!({"deleted": false})),
             Some((current, ..)) if current != base => Reply::Json(409, json!({"hash": current})),

@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 const KEY_LIFETIME: Duration = Duration::from_secs(3_600);
 /// Unknown key ids trigger a refetch (keys rotate), but not more often than this.
 const REFETCH_PAUSE: Duration = Duration::from_secs(30);
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct Verifier {
     issuer: String,
@@ -40,7 +41,9 @@ impl Verifier {
     }
 
     fn fetch_keys(&self) -> Result<HashMap<String, DecodingKey>, String> {
-        let mut response = ureq::get(&self.certs_url).call().map_err(|e| format!("fetch {}: {e}", self.certs_url))?;
+        // A hung key server must not hold the key lock (and every signed-in request) forever.
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(FETCH_TIMEOUT)).build().into();
+        let mut response = agent.get(&self.certs_url).call().map_err(|e| format!("fetch {}: {e}", self.certs_url))?;
         let body = response.body_mut().read_to_string().map_err(|e| e.to_string())?;
         let document: Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
         Ok(document["keys"]

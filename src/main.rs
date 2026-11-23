@@ -87,6 +87,9 @@ const MAX_READ_REPLY_CHARS: usize = 12_000;
 fn read_file(root: &std::path::Path, path: &str, start_line: usize, max_lines: usize) -> Result<String, String> {
     let file = project::inside(root, path)?;
     let rel = project::relative(root, &file);
+    if rel.split('/').any(|part| config::PRIVATE_DIRS.contains(&part)) {
+        return Err(format!("cannot read {rel}: private folder"));
+    }
     let content = project::read_safe(root, &file, MAX_READ_CHARS).filter(|_| file.is_file()).ok_or_else(|| format!("cannot read {rel}: missing, binary or blocked as secret-bearing"))?;
     let lines: Vec<&str> = content.lines().collect();
     let first = start_line.clamp(1, lines.len().max(1));
@@ -317,12 +320,21 @@ fn serve_http(app: Arc<Mutex<App>>, addresses: &str) -> Result<(), String> {
     if files.is_some() {
         eprintln!("[broker] file sync enabled at /sync");
     }
+    let hosts = Arc::new(config::http_allowed_hosts());
+    let open = allowed.is_empty() && verifier.is_none();
+    let insecure = std::env::var("CONTEXT_BROKER_HTTP_ALLOW_OPEN").is_ok_and(|v| v.trim() == "1");
     let mut listeners = Vec::new();
     for address in addresses.split(',').map(str::trim).filter(|address| !address.is_empty()) {
+        // With no allow-list and no sign-in, anyone who can reach the port can read the folder
+        // (and, with sync, write it): only serve that on loopback unless explicitly asked to.
+        let public = std::net::ToSocketAddrs::to_socket_addrs(address).map_or(true, |mut resolved| resolved.any(|socket| !socket.ip().is_loopback()));
+        if open && public && !insecure {
+            return Err(format!("refusing to serve {address} to any caller: set CONTEXT_BROKER_HTTP_ALLOW_IPS or Cloudflare Access, bind 127.0.0.1, or set CONTEXT_BROKER_HTTP_ALLOW_OPEN=1"));
+        }
         let server = tiny_http::Server::http(address).map_err(|e| format!("cannot listen on {address}: {e}"))?;
         eprintln!("[broker] MCP over HTTP at http://{address}/mcp, confined to {}, {}", root.display(), if allowed.is_empty() { "any caller address".to_string() } else { format!("{} allowed network(s)", allowed.len()) });
-        let (app, allowed, verifier, files) = (app.clone(), allowed.clone(), verifier.clone(), files.clone());
-        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed, verifier.as_ref().as_ref(), files.as_ref().as_ref())));
+        let (app, allowed, hosts, verifier, files) = (app.clone(), allowed.clone(), hosts.clone(), verifier.clone(), files.clone());
+        listeners.push(std::thread::spawn(move || serve(&app, &server, &allowed, &hosts, verifier.as_ref().as_ref(), files.as_ref().as_ref())));
     }
     for listener in listeners {
         let _ = listener.join();
@@ -351,7 +363,38 @@ fn sync_reply(files: &sync::Sync, request: &mut tiny_http::Request, route: &str,
     }
 }
 
-fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network], verifier: Option<&access::Verifier>, files: Option<&sync::Sync>) {
+/// The host part of a `Host` header or an origin's authority, lowercased, without the port.
+fn host_part(authority: &str) -> String {
+    let authority = authority.trim().to_ascii_lowercase();
+    match authority.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or("").to_string(),
+        None if authority.matches(':').count() > 1 => authority,
+        None => authority.split(':').next().unwrap_or("").to_string(),
+    }
+}
+
+/// A host the server answers to: an address literal, `localhost`, or one listed in
+/// `CONTEXT_BROKER_HTTP_ALLOW_HOSTS`. Anything else is a DNS name some other site pointed at
+/// this machine (DNS rebinding), so a browser page there must not reach the server.
+fn known_host(host: &str, hosts: &[String]) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok() || host == "localhost" || host.ends_with(".localhost") || hosts.iter().any(|allowed| allowed == host)
+}
+
+/// Browsers name the page that sent a request in `Origin`. Server-side clients send none; a page
+/// from another site must not drive the tools (cross-site request forgery).
+fn known_origin(origin: &str, hosts: &[String]) -> bool {
+    let Some((scheme, rest)) = origin.trim().split_once("://") else { return false };
+    let host = host_part(rest.split('/').next().unwrap_or(""));
+    match scheme.to_ascii_lowercase().as_str() {
+        // The Obsidian apps (desktop and mobile).
+        "app" => host == "obsidian.md",
+        "capacitor" => host == "localhost",
+        "http" | "https" => host == "localhost" || host.ends_with(".localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback()) || hosts.iter().any(|allowed| *allowed == host),
+        _ => false,
+    }
+}
+
+fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Network], hosts: &[String], verifier: Option<&access::Verifier>, files: Option<&sync::Sync>) {
     let json_type = tiny_http::Header::from_bytes("Content-Type", "application/json").expect("valid header");
     for mut request in server.incoming_requests() {
         let plain = |status: u16, text: &str| tiny_http::Response::from_string(text).with_status_code(status);
@@ -367,12 +410,16 @@ fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Networ
         // A caller gets in by address, or by a valid Cloudflare Access token. Like the address
         // header, the token header is only read from the local proxy.
         let listed = caller.is_some_and(|ip| allowed.iter().any(|network| config::network_contains(network, ip)));
-        let signed_in = || {
-            let token = request.headers().iter().find(|header| header.field.equiv("Cf-Access-Jwt-Assertion"));
-            peer.is_some_and(|ip| ip.is_loopback()) && verifier.is_some_and(|verifier| token.is_some_and(|token| verifier.accepts(token.value.as_str())))
-        };
+        let header = |name: &'static str| request.headers().iter().find(|header| header.field.equiv(name)).map(|header| header.value.as_str().to_string());
+        let signed_in = peer.is_some_and(|ip| ip.is_loopback())
+            && verifier.is_some_and(|verifier| header("Cf-Access-Jwt-Assertion").is_some_and(|token| verifier.accepts(&token)));
         let restricted = !allowed.is_empty() || verifier.is_some();
-        let response = if restricted && !(!allowed.is_empty() && listed) && !signed_in() {
+        // A request vouched for by Access came through the tunnel, under its public hostname.
+        let host_ok = signed_in || header("Host").is_none_or(|host| known_host(&host_part(&host), hosts));
+        let origin_ok = header("Origin").is_none_or(|origin| known_origin(&origin, hosts));
+        let response = if !host_ok || !origin_ok {
+            plain(403, "not allowed: unknown Host or Origin (see CONTEXT_BROKER_HTTP_ALLOW_HOSTS)")
+        } else if restricted && !(!allowed.is_empty() && listed) && !signed_in {
             plain(403, "not allowed: unknown address and no valid sign-in")
         } else if let (Some(files), Some(route)) = (files, url.split('?').next().and_then(|path| path.strip_prefix("/sync/"))) {
             match sync_reply(files, &mut request, route, url.split_once('?').map_or("", |(_, query)| query)) {

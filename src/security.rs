@@ -1,6 +1,6 @@
 //! Secret protection: filename patterns plus content signatures, applied to every read.
 
-use crate::config::{SECRET_FILE_PATTERNS, SECRET_KEY_SIGNATURES, SECRET_VALUE_SIGNATURES};
+use crate::config::{SECRET_FILE_PATTERNS, SECRET_KEY_SIGNATURES, SECRET_TOKEN_PATTERNS, SECRET_VALUE_SIGNATURES};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use std::sync::OnceLock;
@@ -27,6 +27,12 @@ fn key_assignment() -> &'static Regex {
     })
 }
 
+/// Well-known credential formats (cloud keys, personal access tokens, API keys).
+fn token_formats() -> &'static Regex {
+    static RX: OnceLock<Regex> = OnceLock::new();
+    RX.get_or_init(|| Regex::new(&SECRET_TOKEN_PATTERNS.join("|")).expect("valid token regex"))
+}
+
 /// True when the file name or relative path matches a hard-coded secret pattern.
 pub fn is_secret_path(rel_path: &str) -> bool {
     let rel = rel_path.replace('\\', "/");
@@ -41,6 +47,7 @@ pub fn has_secret_content(content: &str) -> bool {
         !stripped.is_empty()
             && !stripped.starts_with('#')
             && (SECRET_VALUE_SIGNATURES.iter().any(|sig| stripped.contains(sig))
-                || key_assignment().is_match(line))
+                || key_assignment().is_match(line)
+                || token_formats().is_match(line))
     })
 }

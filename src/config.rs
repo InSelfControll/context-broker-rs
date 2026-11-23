@@ -141,6 +141,17 @@ pub fn http_allowed_networks() -> Result<Vec<Network>, String> {
         .collect()
 }
 
+/// `CONTEXT_BROKER_HTTP_ALLOW_HOSTS`: host names (comma separated, no port) the HTTP transport
+/// answers to besides address literals and `localhost`, such as a tunnel's public hostname.
+pub fn http_allowed_hosts() -> Vec<String> {
+    env_text("CONTEXT_BROKER_HTTP_ALLOW_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .collect()
+}
+
 /// True when `client` lies inside `network` (same address family, same leading `prefix` bits).
 pub fn network_contains(network: &Network, client: std::net::IpAddr) -> bool {
     use std::net::IpAddr::{V4, V6};
@@ -214,8 +225,19 @@ pub const SECRET_FILE_PATTERNS: &[&str] = &[
     "id_ecdsa", "id_ed25519", "*.pem", "*.key", "*.p12", "*.pfx", "*.kubeconfig", "kubeconfig",
     ".docker/config.json", ".pypirc", ".git-credentials", "*.tfstate", "*.tfstate.*", "*.dump",
     "*.sql.dump", "secrets.*", "secret.*", "*.secrets", "*.secret", "credentials.*", "*.credentials",
-    "*.token", "*.tokens", "api_key*", "apikey*", "private_key*", "privatekey*",
+    "*.token", "*.tokens", "api_key*", "apikey*", "private_key*", "privatekey*", ".netrc", "_netrc",
+    ".npmrc", ".pgpass", ".htpasswd", "*.keystore", "*.jks", "*.ovpn", "*.age", "*.gpg", "*.asc",
 ];
+/// Hard-coded: well-known credential formats, matched anywhere in a line.
+pub const SECRET_TOKEN_PATTERNS: &[&str] = &[
+    r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b", r"\bgh[pousr]_[A-Za-z0-9]{36}\b", r"\bgithub_pat_[A-Za-z0-9_]{40,}",
+    r"\bglpat-[A-Za-z0-9_\-]{20,}", r"\bxox[abprs]-[A-Za-z0-9\-]{10,}", r"\bsk-ant-[A-Za-z0-9_\-]{20,}",
+    r"\bsk-(?:proj-)?[A-Za-z0-9_\-]{32,}", r"\bAIza[0-9A-Za-z_\-]{35}\b", r"\b[sr]k_live_[0-9A-Za-z]{20,}",
+    r"\bnpm_[A-Za-z0-9]{36}\b", r"\bhf_[A-Za-z0-9]{34,}\b",
+];
+/// Hard-coded: folders `read_file` never serves, even inside the project (version-control
+/// internals hold remote URLs with embedded tokens; the others hold keys and broker state).
+pub const PRIVATE_DIRS: &[&str] = &[".git", ".svn", ".hg", ".ssh", ".gnupg", ".aws", ".docker", ".kube", ".context-broker"];
 /// Hard-coded: `KEY=value` style names whose presence marks a file as secret-bearing.
 pub const SECRET_KEY_SIGNATURES: &[&str] = &[
     "PRIVATE_KEY", "SECRET_KEY", "API_KEY", "ACCESS_KEY", "AUTH_TOKEN", "PASSWORD", "SECRET",

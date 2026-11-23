@@ -76,7 +76,8 @@ curl -s -X POST http://127.0.0.1:8765/mcp -H 'content-type: application/json' \
 ## 2. Decide who gets in
 
 A caller is accepted when **either** of these holds. With neither configured, every caller that
-can reach the port is accepted, which is only acceptable on localhost.
+can reach the port is accepted, which is only acceptable on localhost: the broker refuses to start
+on any other address in that case, unless you set `CONTEXT_BROKER_HTTP_ALLOW_OPEN=1`.
 
 | Setting | Accepts |
 |---|---|
@@ -88,6 +89,19 @@ connection comes from a proxy on the same machine (a Cloudflare tunnel) is the `
 header believed instead. A caller connecting directly cannot claim another address by sending that
 header. The Access token (`Cf-Access-Jwt-Assertion`) is likewise only read from the local proxy,
 and is verified: signature against the team's public keys, audience, issuer and expiry.
+
+### Browsers on the same machine
+
+A web page you visit can send requests to `127.0.0.1`, and a site can point its own domain at your
+machine (DNS rebinding). So the broker also checks two headers browsers always send:
+
+- `Host` must be an address, `localhost`, or a name listed in `CONTEXT_BROKER_HTTP_ALLOW_HOSTS`
+  (comma separated, no port). Requests carrying a valid Access token skip this check. **If you
+  publish through a tunnel and let callers in by address only (no Access), list the tunnel's
+  public hostname here**, for example `CONTEXT_BROKER_HTTP_ALLOW_HOSTS=vault.example.com`, or set
+  `httpHostHeader: localhost` on the tunnel's ingress rule.
+- `Origin`, when present, must be a local page, the Obsidian app, or a listed host. Server-side
+  clients such as the Claude and ChatGPT apps send none and are unaffected.
 
 ## 3. Publish it with Cloudflare
 
@@ -227,4 +241,5 @@ the sign-in: the first use opens the Access login.
 - [ ] Unauthenticated request **from an outside network** is stopped by Access
 - [ ] Broker has the team domain and audience tag, and the same trusted addresses as the bypass policy
 - [ ] A request from an unlisted address with no sign-in gets `403` from the broker
+- [ ] Without Access, the tunnel's public hostname is in `CONTEXT_BROKER_HTTP_ALLOW_HOSTS`
 - [ ] No real addresses, emails or tokens in anything you publish about your setup
