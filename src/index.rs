@@ -6,7 +6,7 @@ use crate::project::{self, relative};
 use crate::snippet;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -67,18 +67,32 @@ fn cache_paths(root: &Path) -> (PathBuf, PathBuf) {
     (dir.join("index.json"), dir.join("index.bin"))
 }
 
+/// Largest embedding width a cache may claim (the model's is 384).
+const MAX_DIM: usize = 4096;
+
+/// A relative path that stays below its root: no absolute prefix, no `..`, no empty parts.
+fn is_plain_relative(path: &str) -> bool {
+    !path.is_empty() && Path::new(path).components().all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
 fn load_cache(root: &Path) -> Option<Index> {
     let (meta_path, vectors_path) = cache_paths(root);
     let meta: Value = serde_json::from_slice(&std::fs::read(meta_path).ok()?).ok()?;
     if meta["version"].as_u64()? != CACHE_VERSION || meta["model"].as_str()? != MODEL_NAME {
         return None;
     }
-    let dim = meta["dim"].as_u64()? as usize;
+    // The cache sits inside the project, so it is untrusted input: a planted file must not point
+    // reads outside the project or make the size check below overflow.
+    let dim = usize::try_from(meta["dim"].as_u64()?).ok().filter(|dim| (1..=MAX_DIM).contains(dim))?;
     let sig = |v: &Value| -> Option<Signature> { Some([v.get(0)?.as_u64()?, v.get(1)?.as_u64()?]) };
     let mut paths = Vec::new();
     let mut signatures = Vec::new();
     for entry in meta["files"].as_array()? {
-        paths.push(entry.get(0)?.as_str()?.to_string());
+        let path = entry.get(0)?.as_str()?;
+        if !is_plain_relative(path) {
+            return None;
+        }
+        paths.push(path.to_string());
         signatures.push(sig(entry.get(1)?)?);
     }
     let skipped = meta["skipped"]
@@ -87,7 +101,7 @@ fn load_cache(root: &Path) -> Option<Index> {
         .filter_map(|(path, value)| Some((path.clone(), sig(value)?)))
         .collect();
     let bytes = std::fs::read(vectors_path).ok()?;
-    if dim == 0 || bytes.len() != paths.len() * dim * 4 {
+    if paths.len().checked_mul(dim).and_then(|floats| floats.checked_mul(4)) != Some(bytes.len()) {
         return None;
     }
     let vectors = bytes.as_chunks::<4>().0.iter().map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
@@ -137,7 +151,9 @@ impl Engine {
             return Ok(());
         }
         let base = self.indexes.remove(root).or_else(|| load_cache(root));
-        if let Some(index) = base.as_ref().filter(|index| index.fingerprint == print) {
+        let listed: HashSet<&str> = current.iter().map(|(rel, _)| rel.as_str()).collect();
+        // A matching fingerprint is trusted only when every cached file is one collected now.
+        if let Some(index) = base.as_ref().filter(|index| index.fingerprint == print && index.paths.iter().all(|path| listed.contains(path.as_str()))) {
             eprintln!("[broker] index loaded from disk ({} files)", index.paths.len());
             self.indexes.insert(root.to_path_buf(), base.expect("checked"));
             return Ok(());
@@ -222,7 +238,8 @@ impl Engine {
             .take(top_k.clamp(1, 20))
             .filter_map(|(_, row)| {
                 let rel_path = index.paths[row].clone();
-                let content = project::read_safe(root, &root.join(&rel_path), config::READ_MAX_CHARS)?;
+                let file = project::inside(root, &rel_path).ok()?;
+                let content = project::read_safe(root, &file, config::READ_MAX_CHARS)?;
                 let (snippet, _) = snippet::focused(&content, &terms, budget, context);
                 (!snippet.is_empty()).then_some(Hit { rel_path, snippet })
             })
@@ -252,4 +269,52 @@ pub fn render(result: &SearchResult) -> String {
         out.push_str(&format!("\n### {}\n{}", hit.rel_path, hit.snippet));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project holding only a planted cache (and a `.ignore` that hides every file).
+    fn planted(name: &str, dim: u64, files: Value, vectors: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("context-broker-cache-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (meta, bin) = cache_paths(&root);
+        std::fs::create_dir_all(meta.parent().unwrap()).unwrap();
+        std::fs::write(root.join(".ignore"), "*\n").unwrap();
+        let meta_json = json!({"version": CACHE_VERSION, "model": MODEL_NAME, "dim": dim,
+            "fingerprint": fingerprint(&[]), "files": files, "skipped": {}});
+        std::fs::write(meta, meta_json.to_string()).unwrap();
+        std::fs::write(bin, vec![0u8; vectors]).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn cache_dim_cannot_overflow_the_size_check() {
+        // 1 path x 2^62 x 4 wraps to 0 bytes, which an empty vectors file would match.
+        let root = planted("overflow", 1 << 62, json!([["src/a.rs", [0, 0]]]), 0);
+        assert!(load_cache(&root).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_paths_cannot_leave_the_project() {
+        for (name, path) in [("absolute", "/etc/hostname"), ("parent", "../../etc/hostname"), ("empty", "")] {
+            let root = planted(name, 2, json!([[path, [0, 0]]]), 8);
+            assert!(load_cache(&root).is_none(), "{path:?} accepted");
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn matching_fingerprint_does_not_trust_unlisted_files() {
+        // The fingerprint of an empty file list is predictable; the cache names a file that is
+        // not collected now, so it must not be used as-is.
+        let root = planted("unlisted", 2, json!([["notes/elsewhere.md", [0, 0]]]), 8);
+        assert!(load_cache(&root).is_some(), "the cache itself is well-formed");
+        let mut engine = Engine::default();
+        engine.refresh(&root).unwrap();
+        assert!(engine.indexes[&root].paths.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

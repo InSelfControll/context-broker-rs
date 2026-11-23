@@ -16,6 +16,16 @@ pub fn lock_root() -> Result<PathBuf, String> {
     Ok(LOCKED_ROOT.get_or_init(|| root).clone())
 }
 
+/// The folder every call is confined to when serving remote clients.
+pub fn locked_root() -> Option<&'static Path> {
+    LOCKED_ROOT.get().map(PathBuf::as_path)
+}
+
+/// True when some folder of `path` below `root` is hidden (`.git`, `.ssh`, `.context-broker`, ...).
+pub fn in_hidden_folder(root: &Path, path: &Path) -> bool {
+    path.strip_prefix(root).is_ok_and(|rest| rest.components().any(|part| part.as_os_str().to_string_lossy().starts_with('.')))
+}
+
 /// `path` inside `root`, resolved; refused when it leaves the root (`..`, absolute paths, symlinks).
 pub fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
     let resolved = root.join(path.trim()).canonicalize().map_err(|_| format!("not found: {path}"))?;
@@ -25,7 +35,16 @@ pub fn inside(root: &Path, path: &str) -> Result<PathBuf, String> {
 /// Explicit argument, then `CONTEXT_BROKER_PROJECT_ROOT`, then marker detection, then CWD.
 pub fn resolve_root(explicit: &str) -> Result<PathBuf, String> {
     if let Some(locked) = LOCKED_ROOT.get() {
-        return if explicit.trim().is_empty() { Ok(locked.clone()) } else { inside(locked, explicit).map_err(|_| format!("project_root must be inside {}", locked.display())) };
+        if explicit.trim().is_empty() {
+            return Ok(locked.clone());
+        }
+        // A sub-folder of the served one, but never a hidden one: as a root, `.git` or `.ssh`
+        // would make its own files look like ordinary project files.
+        let root = inside(locked, explicit).map_err(|_| format!("project_root must be inside {}", locked.display()))?;
+        if in_hidden_folder(locked, &root) {
+            return Err(format!("project_root cannot be a hidden folder: {explicit}"));
+        }
+        return if root.is_dir() { Ok(root) } else { Err(format!("project root is not a directory: {explicit}")) };
     }
     let candidate = if !explicit.trim().is_empty() {
         PathBuf::from(explicit.trim())

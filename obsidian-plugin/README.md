@@ -26,8 +26,11 @@ Start the broker in HTTP mode with `CONTEXT_BROKER_SYNC=1`. The plugin talks to
 
 Behind Cloudflare Access with Managed OAuth: on a trusted network no sign-in is needed. Elsewhere,
 open the plugin settings and choose **Sign in**; the browser opens, and after you approve, it
-returns to Obsidian through `obsidian://context-broker-sync`. Tokens are stored in the plugin's
-`data.json` inside `.obsidian/`, which is never synced.
+returns to Obsidian through `obsidian://context-broker-sync`. On Obsidian 1.11.4 and later the
+tokens are kept in the app's secret storage, outside the vault; `data.json` holds only the client
+registration. On older versions they fall back to the plugin's `data.json` inside `.obsidian/`.
+This plugin never syncs that folder, but other tools may (git, cloud sync): exclude
+`.obsidian/plugins/*/data.json` from them. `scripts/vault-sync.sh` does this for you.
 
 ## Build
 
@@ -45,7 +48,7 @@ Copy two files into `<vault>/.obsidian/plugins/context-broker-sync/`:
 - `manifest.json`
 
 There is no `styles.css`. The plugin creates the third file in that folder, `data.json`
-(settings, tokens and sync state), on first use. Then enable **Context Broker Sync** under
+(settings, sync state, and on older Obsidian versions the tokens), on first use. Then enable **Context Broker Sync** under
 Settings, Community plugins, and set the server URL. On Android the folder is the same path
 inside the vault on the device.
 

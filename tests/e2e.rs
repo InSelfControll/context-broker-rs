@@ -103,6 +103,15 @@ fn write(root: &Path, rel: &str, content: &str) {
     std::fs::write(path, content).unwrap();
 }
 
+/// Stand-in secret values for the fixture. Built at run time so the source holds no
+/// credential-shaped literal for secret scanners to flag; the tests only need them to be unique.
+fn fake_dotenv_value() -> String {
+    format!("dotenv-marker-{}", "z8".repeat(6))
+}
+fn fake_api_key_value() -> String {
+    format!("apikey-marker-{}", "x4".repeat(6))
+}
+
 fn fixture() -> (PathBuf, PathBuf, PathBuf) {
     let base = std::env::temp_dir().join(format!("context-broker-e2e-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -112,8 +121,8 @@ fn fixture() -> (PathBuf, PathBuf, PathBuf) {
     write(&root, "src/auth.py", &format!("{filler}\ndef login_user(name, password_hash):\n    \"\"\"Authenticate a user and start a session.\"\"\"\n    return sessions.start(name)\n\n{filler}"));
     write(&root, "src/billing.py", "def charge_card(amount):\n    \"\"\"Charge a customer credit card for an invoice.\"\"\"\n    return gateway.charge(amount)\n");
     write(&root, "docs/weather.md", "# Weather\nNotes about rain, clouds and sunshine forecasts.\n");
-    write(&root, ".env", "DATABASE_URL=postgres://secret-in-dotenv\n");
-    write(&root, "src/settings.py", "API_KEY=abc123secretvalue\ndef configure():\n    return login_user\n");
+    write(&root, ".env", &format!("DATABASE_URL={}\n", fake_dotenv_value()));
+    write(&root, "src/settings.py", &format!("API_KEY={}\ndef configure():\n    return login_user\n", fake_api_key_value()));
     write(&root, "node_modules/lib/index.js", "function login_user() { return 'ignored-dependency'; }\n");
     write(&root, "src/data.bin", "login_user unsupported extension\n");
     (base.clone(), root.canonicalize().unwrap(), storage)
@@ -164,7 +173,8 @@ fn full_mcp_session() {
     assert!(!found.contains("helper_30"), "snippet is focused on the match, not the whole file");
     assert_eq!(found.matches(root_arg).count(), 1, "root stated once");
     let everything = server.ok("search_context", json!({"query": "login_user settings api key database", "project_root": root_arg, "top_k": 20}));
-    for leaked in ["abc123secretvalue", "secret-in-dotenv", "ignored-dependency", "settings.py", ".env", "data.bin", "node_modules"] {
+    let (api_key, dotenv) = (fake_api_key_value(), fake_dotenv_value());
+    for leaked in [api_key.as_str(), dotenv.as_str(), "ignored-dependency", "settings.py", ".env", "data.bin", "node_modules"] {
         assert!(!everything.contains(leaked), "must not expose {leaked}");
     }
     let overview = server.ok("search_context", json!({"project_root": root_arg}));
@@ -187,7 +197,7 @@ fn full_mcp_session() {
     let regex = server.ok("find_in_codebase", json!({"pattern": r"def \w+_(card|payment)", "project_root": root_arg, "use_regex": true}));
     assert!(regex.starts_with("2 matches in 1/3 files") && regex.contains("L4: def refund_payment(invoice):"));
     assert!(server.ok("find_in_codebase", json!({"pattern": "def", "project_root": root_arg, "file_glob": "*.toml"})).starts_with("No matches"));
-    assert!(server.ok("find_in_codebase", json!({"pattern": "abc123secretvalue", "project_root": root_arg})).starts_with("No matches"));
+    assert!(server.ok("find_in_codebase", json!({"pattern": fake_api_key_value(), "project_root": root_arg})).starts_with("No matches"));
     assert!(server.call("find_in_codebase", json!({"pattern": "(unclosed", "project_root": root_arg, "use_regex": true})).1);
 
     // --- routing ----------------------------------------------------------------------------------
@@ -574,8 +584,78 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
     assert_eq!(file, "src/billing.py · lines 4-5 of 6\n4: def refund_payment(invoice):\n5:     \"\"\"Return money to the customer.\"\"\"");
     for blocked in ["../storage/no-obsidian.json", "/etc/hostname", ".env", "src/settings.py", "src/missing.py"] {
         let (text, is_error) = call("read_file", json!({"path": blocked}));
-        assert!(is_error && !text.contains("secret-in-dotenv") && !text.contains("abc123secretvalue"), "{blocked}: {text}");
+        assert!(is_error && !text.contains(&fake_dotenv_value()) && !text.contains(&fake_api_key_value()), "{blocked}: {text}");
     }
+    // Version-control internals (remote URLs with tokens) and well-known key formats stay hidden.
+    let token = format!("ghp_{}", "a1".repeat(18));
+    write(root, ".git/config", "[remote \"origin\"]\n\turl = https://example.com/repo.git\n");
+    write(root, "src/client.js", &format!("const client = connect({{\"auth\":\"{token}\"}});\n"));
+    for blocked in [".git/config", "src/client.js"] {
+        let (text, is_error) = call("read_file", json!({"path": blocked}));
+        assert!(is_error && !text.contains("example.com") && !text.contains(&token), "{blocked}: {text}");
+    }
+    // Nor by naming the private folder itself as the project root.
+    for (sub_root, path) in [(".git", "config"), ("./.git", "config"), ("src/../.git", "config")] {
+        let (text, is_error) = call("read_file", json!({"project_root": sub_root, "path": path}));
+        assert!(is_error && !text.contains("example.com"), "{sub_root}/{path}: {text}");
+    }
+    let (text, is_error) = call("search_context", json!({"query": "remote origin", "project_root": ".git"}));
+    assert!(is_error && text.contains("hidden folder"), "{text}");
+    let (_, is_error) = call("read_file", json!({"project_root": "src", "path": "billing.py"}));
+    assert!(!is_error, "an ordinary sub-folder still works as a root");
+    std::fs::remove_dir_all(root.join(".git")).unwrap();
+    std::fs::remove_file(root.join("src/client.js")).unwrap();
+    // Exporting every project's memory would reach past the served folder.
+    let (text, is_error) = call("export_memory", json!({"target": "obsidian", "all_projects": true}));
+    assert!(is_error && text.contains("all_projects"), "{text}");
+
+    // Browsers: a page from another site (CSRF) or a DNS name pointed at this machine (DNS
+    // rebinding) is refused; the Obsidian apps and local pages are not.
+    let status_with = |extra: &str| -> u16 {
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        write!(stream, "POST /mcp HTTP/1.1\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply.split_whitespace().nth(1).unwrap().parse().unwrap()
+    };
+    let host = format!("Host: {address}\r\n");
+    for (extra, expected) in [
+        (host.clone(), 200), ("Host: localhost:8765\r\n".to_string(), 200), ("Host: [::1]:8765\r\n".to_string(), 200),
+        ("Host: rebind.attacker.example:8765\r\n".to_string(), 403),
+        (format!("{host}Origin: https://attacker.example\r\n"), 403), (format!("{host}Origin: null\r\n"), 403),
+        (format!("{host}Origin: http://localhost.attacker.example\r\n"), 403),
+        (format!("{host}Origin: http://localhost:3000\r\n"), 200), (format!("{host}Origin: app://obsidian.md\r\n"), 200),
+        (format!("{host}Origin: capacitor://localhost\r\n"), 200),
+    ] {
+        assert_eq!(status_with(&extra), expected, "{extra:?}");
+    }
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    drop(server.stdin.take());
+
+    // Open to every caller only on loopback: a non-loopback bind with no allow-list or sign-in
+    // refuses to start.
+    let wide = format!("0.0.0.0:{}", std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port());
+    let mut open = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&wide)), ("CONTEXT_BROKER_PROJECT_ROOT", root)]);
+    assert!(!open.child.wait().unwrap().success());
+    drop(open.stdin.take());
+
+    // A named host is answered once listed.
+    let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_HTTP_ADDR", Path::new(&address)), ("CONTEXT_BROKER_PROJECT_ROOT", root),
+        ("CONTEXT_BROKER_HTTP_ALLOW_HOSTS", Path::new("broker.example.org"))]);
+    let listed_host = || -> u16 {
+        let mut stream = (0..100)
+            .find_map(|_| std::net::TcpStream::connect(&address).ok().or_else(|| { std::thread::sleep(std::time::Duration::from_millis(50)); None }))
+            .expect("server is listening");
+        let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        write!(stream, "POST /mcp HTTP/1.1\r\nHost: Broker.Example.org\r\nOrigin: https://broker.example.org\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply.split_whitespace().nth(1).unwrap().parse().unwrap()
+    };
+    assert_eq!(listed_host(), 200);
+
     server.child.kill().unwrap();
     server.child.wait().unwrap();
     drop(server.stdin.take());
@@ -766,10 +846,27 @@ fn file_sync(base: &Path, storage: &Path, log: &Path) {
         }
     }
     assert_eq!(std::fs::read_to_string(vault.join(".obsidian/app.json")).unwrap(), "{}");
+    // A symlinked folder inside the vault does not lead out of it.
+    let outside = base.join("sync-outside");
+    write(&outside, "private.md", "outside the vault\n");
+    std::os::unix::fs::symlink(&outside, vault.join("Linked")).unwrap();
+    let outside_hash = hex_sha256(b"outside the vault\n");
+    for (method, path, guard) in [("GET", "Linked/private.md", None), ("DELETE", "Linked/private.md", Some(outside_hash.as_str())),
+        ("PUT", "Linked/private.md", Some(outside_hash.as_str())), ("PUT", "Linked/new/created.md", Some(""))] {
+        assert_eq!(http(method, &format!("/sync/file?path={path}"), guard, b"overwritten").0, 400, "{method} {path}");
+    }
+    assert_eq!(std::fs::read_to_string(outside.join("private.md")).unwrap(), "outside the vault\n");
+    assert!(!outside.join("new").exists());
+    std::fs::remove_file(vault.join("Linked")).unwrap();
     let after: Vec<String> = manifest().into_iter().map(|(path, _)| path).collect();
     assert_eq!(after, ["New Folder/שלום pic.bin"]);
     assert_eq!(http("POST", "/sync/file?path=x.md", None, b"").0, 404);
     server.child.kill().unwrap();
     server.child.wait().unwrap();
     drop(server.stdin.take());
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }

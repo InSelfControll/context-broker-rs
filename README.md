@@ -308,6 +308,8 @@ All settings are environment variables. Names are shared with the Python broker 
 | `CONTEXT_BROKER_INDEX_MAX_FILE_BYTES` | `2000000` | Skip larger files (`0` disables the limit) |
 | `CONTEXT_BROKER_HTTP_ADDR` | none (stdio) | Serve MCP over HTTP on this address (or comma-separated addresses), for example `127.0.0.1:8765`; requires `CONTEXT_BROKER_PROJECT_ROOT` |
 | `CONTEXT_BROKER_HTTP_ALLOW_IPS` | none | HTTP mode: only these caller addresses or CIDR ranges are served |
+| `CONTEXT_BROKER_HTTP_ALLOW_HOSTS` | none | HTTP mode: host names answered besides addresses and `localhost` (blocks DNS rebinding); list a tunnel's public hostname here when not using Access |
+| `CONTEXT_BROKER_HTTP_ALLOW_OPEN` | off | HTTP mode: `1` allows serving a non-loopback address with no allow-list and no Access (anyone who can reach the port gets in) |
 | `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` | none | HTTP mode: your Cloudflare Access team domain, `<team>.cloudflareaccess.com` |
 | `CONTEXT_BROKER_ACCESS_AUD` | none | HTTP mode: the Access application's audience (AUD) tag |
 | `CONTEXT_BROKER_SYNC` | off | HTTP mode: `1` enables the `/sync` file endpoints used by the Obsidian plugin |
