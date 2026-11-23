@@ -83,6 +83,44 @@ sudo install -m 755 context-broker /usr/local/bin/context-broker
 
 Use `aarch64-unknown-linux-musl` in the file name on ARM. A `.sha256` file is published next to each archive.
 
+**macOS (Apple silicon).** The release also carries `context-broker-aarch64-apple-darwin.tar.gz`:
+
+```bash
+curl -L https://github.com/InSelfControll/context-broker-rs/releases/latest/download/context-broker-aarch64-apple-darwin.tar.gz | tar xz
+sudo install -m 755 context-broker /usr/local/bin/context-broker
+```
+
+The binary is not notarized. Downloaded with `curl` as above it runs as is; if you download it with a browser, clear the quarantine flag once with `xattr -d com.apple.quarantine /usr/local/bin/context-broker`.
+
+**Nix and NixOS (flakes).** The repository is a flake for `x86_64-linux`, `aarch64-linux` and `aarch64-darwin`:
+
+```bash
+nix run github:InSelfControll/context-broker-rs            # try it
+nix profile install github:InSelfControll/context-broker-rs # install for your user
+```
+
+On NixOS, add it as an input and either use the package directly or apply the overlay:
+
+```nix
+{
+  inputs.context-broker.url = "github:InSelfControll/context-broker-rs";
+
+  outputs = { nixpkgs, context-broker, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ({ pkgs, ... }: {
+          nixpkgs.overlays = [ context-broker.overlays.default ];
+          environment.systemPackages = [ pkgs.context-broker ];
+        })
+      ];
+    };
+  };
+}
+```
+
+`nix develop` opens a shell with the Rust toolchain, clippy and rust-analyzer.
+
 **Option 2: build from source.** Needs a recent stable Rust (developed on 1.100; the 1.92 shipped by some distributions is too old for a dependency, so use the prebuilt binary there).
 
 ```bash
@@ -373,7 +411,7 @@ cargo test --release
 
 One end-to-end test drives the real binary over MCP stdio through every tool, the secret and ignore policies, incremental indexing and persistence across a restart. It needs the embedding model (found in the Hugging Face cache, or downloaded once).
 
-Static binaries are built by the `Static binaries` GitHub Actions workflow (`.github/workflows/release.yml`): run it manually for artifacts, or push a `v*` tag to publish a release. To build one yourself: `rustup target add x86_64-unknown-linux-musl`, install a musl C compiler (`musl-tools` on Debian/Ubuntu), then `cargo build --release --target x86_64-unknown-linux-musl`.
+Releases are built by the `Release` GitHub Actions workflow (`.github/workflows/release.yml`): static Linux binaries for x86-64 and ARM64, an Apple-silicon macOS binary, and the Nix flake on all three platforms, each built and tested. Raising `version` in `Cargo.toml` on `main` publishes that version as a release (tag `v<version>`) once everything passes; pushing a matching `v*` tag does the same. Pull requests are built and tested without releasing, and "Run workflow" in the Actions tab builds everything on demand. To build one yourself: `rustup target add x86_64-unknown-linux-musl`, install a musl C compiler (`musl-tools` on Debian/Ubuntu), then `cargo build --release --target x86_64-unknown-linux-musl`.
 
 To rebuild the demo GIF: `uv run --with pillow python docs/assets/make_gif.py`.
 

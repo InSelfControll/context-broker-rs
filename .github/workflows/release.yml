@@ -1,19 +1,76 @@
-name: Static binaries
+name: Release
 
-# Builds fully static (musl) Linux binaries that run on any distribution.
-# - Run manually from the Actions tab to get the binaries as workflow artifacts.
-# - Push a tag like v0.1.0 to also publish them on a GitHub release.
+# Builds context-broker for every supported platform and publishes a GitHub release:
+#   - Linux x86-64 and ARM64: fully static (musl) binaries that run on any distribution
+#   - macOS on Apple silicon (aarch64)
+#   - The Nix flake on all three, for NixOS and nix-darwin users
+#
+# When it runs:
+#   - A push to main that raises the version in Cargo.toml releases that version
+#     automatically (tag v<version>), once every build and test has passed.
+#   - Pushing a tag like v1.2.3 by hand releases it the same way.
+#   - Pull requests that touch the code or the build are built and tested, not released.
+#   - "Run workflow" in the Actions tab builds everything without releasing.
 on:
-  workflow_dispatch:
   push:
+    branches: [main]
     tags: ["v*"]
+    paths-ignore: ["**.md", "docs/**", "obsidian-plugin/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**", "obsidian-plugin/**"]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  plan:
+    name: Decide whether to release
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      release: ${{ steps.plan.outputs.release }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+          tag="v$version"
+          release=false
+          if [[ $REF == refs/tags/v* ]]; then
+            # A hand-pushed tag must match the version the binaries report.
+            [[ $REF_NAME == "$tag" ]] || { echo "::error::tag $REF_NAME does not match Cargo.toml version $version"; exit 1; }
+            release=true
+          elif [[ $EVENT == push && $REF == refs/heads/main ]]; then
+            # A version that has no release yet means the version was raised: release it.
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null; then
+              echo "$tag is already released; nothing to release"
+            else
+              release=true
+            fi
+          fi
+          # A push to main without a new version was already built and tested in its pull
+          # request: skip the (macOS-heavy) matrix then.
+          build=true
+          if [[ $EVENT == push && $REF == refs/heads/main && $release == false ]]; then build=false; fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "version $version, tag $tag, release $release"
+
   build:
     name: ${{ matrix.target }}
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -23,17 +80,23 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
     env:
       TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install musl toolchain
+      - name: Install the Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET"
+          rustup default stable
+
+      - name: Install the musl toolchain
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          rustup toolchain install stable --profile minimal --target "$TARGET"
-          rustup default stable
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -43,23 +106,37 @@ jobs:
         run: cargo build --release --locked --target "$TARGET"
 
       - name: Check the binary is static
+        if: runner.os == 'Linux'
         run: |
           file "target/$TARGET/release/context-broker" | tee /dev/stderr | grep -Eq "static(ally|-pie) linked"
+
+      - name: Check the binary is for Apple silicon
+        if: runner.os == 'macOS'
+        run: |
+          file "target/$TARGET/release/context-broker" | tee /dev/stderr | grep -q "arm64"
 
       - name: End-to-end test
         run: cargo test --release --locked --target "$TARGET"
 
       - name: Run in a container with no C library
+        if: runner.os == 'Linux'
         run: |
           printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
             | docker run --rm -i -v "$PWD/target/$TARGET/release:/app:ro" busybox:uclibc /app/context-broker \
+            | tee /dev/stderr | grep -q '"name":"context-broker"'
+
+      - name: Run the binary
+        if: runner.os == 'macOS'
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            | "target/$TARGET/release/context-broker" \
             | tee /dev/stderr | grep -q '"name":"context-broker"'
 
       - name: Package
         run: |
           mkdir -p dist
           tar -C "target/$TARGET/release" -czf "dist/context-broker-$TARGET.tar.gz" context-broker
-          cd dist && sha256sum "context-broker-$TARGET.tar.gz" > "context-broker-$TARGET.tar.gz.sha256"
+          cd dist && shasum -a 256 "context-broker-$TARGET.tar.gz" > "context-broker-$TARGET.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -67,10 +144,38 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  nix:
+    name: nix (${{ matrix.system }})
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: aarch64-darwin
+            runner: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - name: Check the flake
+        run: nix flake check --all-systems --no-build
+      - name: Build the package
+        run: nix build .#default --print-build-logs
+      - name: Run the built binary
+        run: |
+          printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}' \
+            | ./result/bin/context-broker \
+            | tee /dev/stderr | grep -q '"name":"context-broker"'
+
   release:
-    name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    name: Publish ${{ needs.plan.outputs.tag }}
+    needs: [plan, build, nix]
+    if: needs.plan.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -79,7 +184,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create release
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$TAG" --generate-notes
