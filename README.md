@@ -11,7 +11,7 @@ A Rust port of the core of [Context Broker](https://github.com/InSelfControll/co
 [![MCP](https://img.shields.io/badge/Protocol-MCP-green?style=for-the-badge)](https://modelcontextprotocol.io)
 [![Transport](https://img.shields.io/badge/Transport-stdio-lightgrey?style=for-the-badge)](#-quick-start)
 
-<img src="docs/assets/demo.gif" alt="An agent calls search_context and find_in_codebase and receives short plain-text replies" width="900"/>
+<img src="docs/assets/demo.gif" alt="An agent calls search_context and find_in_codebase and receives short plain-text replies" width="100%"/>
 
 **Works with:** Claude Code · Claude Desktop · Cursor · Codex CLI · any MCP client that can launch a stdio server
 
