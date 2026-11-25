@@ -418,6 +418,7 @@ Honcho and Redis backends, the web dashboard, task delegation to worker models, 
 | [docs/TOOLS.md](docs/TOOLS.md) | Index of the tools |
 | [obsidian-plugin/](obsidian-plugin/README.md) | Obsidian plugin (desktop and Android) that keeps a vault in sync with a broker running in HTTP mode |
 | [docs/REMOTE.md](docs/REMOTE.md) | Serving a vault or project to the Claude and ChatGPT apps: HTTP mode, who gets in, Cloudflare Tunnel and Access step by step, sync |
+| [docs/OAUTH-CLIENTS.md](docs/OAUTH-CLIENTS.md) | Allowing an app's OAuth redirect address in Cloudflare Access, and making a client ID and secret for apps that ask for one |
 | [docs/tools/](docs/tools/) | One page per tool with parameters and an example reply |
 | [docs/assets/make_gif.py](docs/assets/make_gif.py) | Generator for the demo GIF |
 
