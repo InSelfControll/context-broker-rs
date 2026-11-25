@@ -154,15 +154,14 @@ fn full_mcp_session() {
     let names: Vec<&str> = tools.iter().map(|tool| tool["name"].as_str().unwrap()).collect();
     assert_eq!(
         names,
-        ["search_context", "find_in_codebase", "route_task", "record_turn", "record_session", "load_chat_context",
-         "load_cross_session_context", "lookup_project_history", "save_search_results", "list_saved_results", "load_saved_results",
-         "export_memory"]
+        ["search_context", "find_in_codebase", "record_session", "load_chat_context", "load_cross_session_context",
+         "lookup_project_history", "save_search_results", "load_saved_results", "export_memory"]
     );
     for tool in tools {
         assert_eq!(tool["inputSchema"]["type"], "object");
         assert!(tool.get("outputSchema").is_none(), "no output schema: replies are plain text");
     }
-    assert!(listing.to_string().len() < 5_000, "tool listing stays small");
+    assert!(listing.to_string().len() < 3_200, "tool listing stays small");
 
     // --- semantic search: relevance, lean format, secret and ignore policy -----------------------
     let found = server.ok("search_context", json!({"query": "authenticate user login session", "project_root": root_arg, "top_k": 2}));
@@ -244,6 +243,8 @@ fn full_mcp_session() {
     assert_eq!(server.ok("list_saved_results", json!({"project_root": root_arg})), "No saved results.");
     assert!(server.ok("save_search_results", json!({"query": "login user", "filename": "../auth notes", "project_root": root_arg})).starts_with("Saved to"));
     assert_eq!(server.ok("list_saved_results", json!({"project_root": root_arg})), "auth notes.json");
+    // The listed tool lists when no name is given; the unlisted `list_saved_results` still answers.
+    assert_eq!(server.ok("load_saved_results", json!({"project_root": root_arg})), "auth notes.json");
     let loaded = server.ok("load_saved_results", json!({"filename": "auth notes", "project_root": root_arg}));
     assert!(loaded.starts_with("query: login user\n") && loaded.contains("### src/auth.py"));
     assert!(server.call("load_saved_results", json!({"filename": "nope", "project_root": root_arg})).1);
@@ -285,7 +286,7 @@ fn obsidian_store(base: &Path, root: &Path, storage: &Path, log: &Path) {
     // Naming the vault is enough to select the Obsidian store.
     let mut server = Server::start_with(storage, log, &[("CONTEXT_BROKER_OBSIDIAN_VAULT", &vault)]);
     server.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
-    assert_eq!(server.rpc("tools/list", json!({}))["result"]["tools"].as_array().unwrap().len(), 12);
+    assert_eq!(server.rpc("tools/list", json!({}))["result"]["tools"].as_array().unwrap().len(), 9);
 
     // Text that looks like note structure must come back exactly as it was saved.
     let tricky = "Plan:\n\n> [!info] assistant · not a real message\n[!quote] user\n  indented\n---\n# heading";
@@ -344,7 +345,7 @@ fn graphify_store(root: &Path, storage: &Path, log: &Path) {
     server.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
     let listing = server.rpc("tools/list", json!({}));
     let tools = listing["result"]["tools"].as_array().unwrap();
-    assert_eq!((tools.len(), tools[12]["name"].as_str().unwrap()), (13, "query_graph"));
+    assert_eq!((tools.len(), tools[9]["name"].as_str().unwrap()), (10, "query_graph"));
     assert!(server.ok("route_task", json!({"task": "who are the callers and dependencies of this"})).starts_with("query_graph"));
 
     // --- graph queries ------------------------------------------------------------------------

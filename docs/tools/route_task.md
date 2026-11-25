@@ -1,5 +1,7 @@
 # `route_task`
 
+> No longer in the tool list: the listed tools are few enough to choose from directly. The server still answers it for clients that call it by name.
+
 Suggests which of this server's tools fit a task by counting words shared with each tool's name and description; words such as `exact`, `grep`, `regex`, `where is` or `def ` boost `find_in_codebase`. Falls back to `search_context`. It needs no project and reads no files.
 
 ## Parameters

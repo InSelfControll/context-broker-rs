@@ -1,5 +1,7 @@
 # `list_saved_results`
 
+> No longer in the tool list: `load_saved_results` without a `filename` does the same. The server still answers it for clients that call it by name.
+
 Lists the saved search results of the project, one file name per line, sorted.
 
 ## Parameters

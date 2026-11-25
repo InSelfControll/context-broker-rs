@@ -219,7 +219,7 @@ With `CONTEXT_BROKER_HTTP_ADDR` set, `main.rs` serves `POST /mcp` with `tiny_htt
 | | Python Context Broker | This port |
 |---|---|---|
 | Runtime | Python 3.13, FastMCP, PyTorch, scikit-learn | Rust, `candle`, hand-written JSON-RPC |
-| Tool surface | 36 tools, router, handoffs, delegation, generators | 12 tools: search, memory, saved results, export (plus `query_graph` with a Graphify graph) |
+| Tool surface | 36 tools, router, handoffs, delegation, generators | 9 listed tools: search, memory, saved results, export (plus `query_graph` with a Graphify graph) |
 | Transports | stdio, SSE, streamable HTTP, shared service | stdio only |
 | Embedding | sentence-transformers (in a worker process) | the same weights, in process via `candle` |
 | Index | cached JSON | `index.json` + raw `f32` `index.bin` |

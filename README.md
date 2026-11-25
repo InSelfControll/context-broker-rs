@@ -4,7 +4,7 @@
 
 **Semantic code search and project memory for AI coding agents, in one 8 MB binary.**
 
-A Rust port of the core of [Context Broker](https://github.com/InSelfControll/context-broker-mcp). It speaks the Model Context Protocol over stdio, finds relevant code by meaning, remembers decisions across sessions, and keeps every reply small: 12 tools, plain-text answers, no telemetry. 100% local, no API keys, no Python, no PyTorch.
+A Rust port of the core of [Context Broker](https://github.com/InSelfControll/context-broker-mcp). It speaks the Model Context Protocol over stdio, finds relevant code by meaning, remembers decisions across sessions, and keeps every reply small: 9 tools, plain-text answers, no telemetry. 100% local, no API keys, no Python, no PyTorch.
 
 [![Rust](https://img.shields.io/badge/Rust-2024%20edition-000000?style=for-the-badge&logo=rust&logoColor=white)](Cargo.toml)
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial-blue.svg?style=for-the-badge)](LICENSE)
@@ -15,7 +15,7 @@ A Rust port of the core of [Context Broker](https://github.com/InSelfControll/co
 
 **Works with:** Claude Code · Claude Desktop · Cursor · Codex CLI · any MCP client that can launch a stdio server
 
-[🚀 Quick Start](#-quick-start) · [✨ Features](#-features) · [🧰 Tools](#-the-11-tools) · [📊 Performance](#-performance) · [⚙️ Settings](#%EF%B8%8F-settings) · [🏗️ Architecture](ARCHITECTURE.md)
+[🚀 Quick Start](#-quick-start) · [✨ Features](#-features) · [🧰 Tools](#-the-tools) · [📊 Performance](#-performance) · [⚙️ Settings](#%EF%B8%8F-settings) · [🏗️ Architecture](ARCHITECTURE.md)
 
 </div>
 
@@ -27,7 +27,7 @@ Every MCP tool you register costs tokens in every session, before the agent has 
 
 | | Python Context Broker | This port |
 |---|---|---|
-| Tool list each session pays for | 36 tools, 3,986 tokens | **12 tools, 1,191 tokens** |
+| Tool list each session pays for | 36 tools, 3,986 tokens | **9 tools, 761 tokens** |
 | Average search reply (6 queries) | ~900 tokens | **~660 tokens** |
 | Startup | 0.8 s | **2 ms** |
 | Install | Python env + PyTorch | **one 8 MB binary** |
@@ -206,7 +206,7 @@ Measured on a 235-file repository, against the already-optimized Python server.
 
 | | Python | Rust |
 |---|---|---|
-| Tool list each session pays for | 36 tools, 3,986 tokens | 12 tools, 1,191 tokens |
+| Tool list each session pays for | 36 tools, 3,986 tokens | 9 tools, 761 tokens |
 | Average search reply (6 queries) | ~900 tokens | ~660 tokens |
 | Startup | 0.8 s | 2 ms |
 | First search in a new process (index cached) | ~8 s | 78 ms |
@@ -221,20 +221,19 @@ Measured on a 235-file repository, against the already-optimized Python server.
 
 ## 🧰 The Tools
 
-Twelve tools are always listed. One more, `query_graph`, is listed when a Graphify graph is available (see [Storage backends](#-storage-backends)).
+Nine tools are always listed. One more, `query_graph`, is listed when a Graphify graph is available (see [Storage backends](#-storage-backends)).
+
+`route_task`, `record_turn` and `list_saved_results` are still answered for clients that call them, but are not listed, so no session pays for them: `record_session` takes one exchange or many, and `load_saved_results` without a `filename` lists the saved results.
 
 | Tool | Purpose |
 |------|---------|
 | [`search_context`](docs/tools/search_context.md) | Semantic search; best-matching lines of the top files. No query gives a project overview. |
 | [`find_in_codebase`](docs/tools/find_in_codebase.md) | Exact literal or regex search; file, line and snippet. |
-| [`route_task`](docs/tools/route_task.md) | Suggest which of these tools fit a task. |
-| [`record_turn`](docs/tools/record_turn.md) | Append one user/assistant exchange to a session. |
 | [`record_session`](docs/tools/record_session.md) | Append a whole conversation to a session. |
 | [`load_chat_context`](docs/tools/load_chat_context.md) | Load one stored session, newest messages last. |
 | [`load_cross_session_context`](docs/tools/load_cross_session_context.md) | Find stored messages across all sessions of the project. |
 | [`lookup_project_history`](docs/tools/lookup_project_history.md) | Up to three past exchanges that match an issue. |
 | [`save_search_results`](docs/tools/save_search_results.md) | Run a semantic search and save the reply under a name. |
-| [`list_saved_results`](docs/tools/list_saved_results.md) | List saved search results. |
 | [`load_saved_results`](docs/tools/load_saved_results.md) | Load a saved search result. |
 | [`export_memory`](docs/tools/export_memory.md) | Copy the stored history and saved results into Obsidian or Graphify. |
 | [`query_graph`](docs/tools/query_graph.md) | Graphify knowledge graph: a node's connections, or the shortest path between two nodes. |
