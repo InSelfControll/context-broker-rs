@@ -36,8 +36,9 @@ client registration.
 |---|---|
 | Claude | `https://claude.ai/api/mcp/auth_callback` and `https://claude.com/api/mcp/auth_callback` |
 | ChatGPT | `https://chatgpt.com/connector_platform_oauth_redirect`, `https://chatgpt.com/connector/oauth/*` |
-| Google (custom MCP connector) | `https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-<id>`. The `<id>` belongs to one connector; adding the connector again can give a new one |
+| Google Gemini (custom MCP connector) | `https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-<id>`. The `<id>` belongs to one connector; adding the connector again can give a new one. To allow any Google connector, use `https://oauth-redirect.googleusercontent.com/r/*` |
 | Obsidian plugin in this repository | `obsidian://context-broker-sync` |
+| Claude Code, Codex and other local clients | no address to list: turn on "Allow any on localhost" and "Allow any on loopback" |
 
 ### With the API instead of the dashboard
 
