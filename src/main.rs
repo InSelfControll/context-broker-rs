@@ -14,6 +14,7 @@ mod project;
 mod security;
 mod snippet;
 mod sync;
+mod update;
 
 use serde_json::{Value, json};
 use std::io::{BufRead, Read, Write};
@@ -274,7 +275,13 @@ fn handle(app: &Mutex<App>, method: &str, params: &Value) -> Result<Value, (i64,
             let outcome = call(&mut app, name, args);
             app.last_used = Instant::now();
             let (blocks, is_error) = match outcome {
-                Ok(blocks) => (blocks, false),
+                Ok(mut blocks) => {
+                    // A local agent passes the news of a release on to its user; said once a day.
+                    if REMOTE.get().is_none() {
+                        blocks.extend(update::take_note());
+                    }
+                    (blocks, false)
+                }
                 Err(message) => (vec![format!("Error: {message}")], true),
             };
             let content: Vec<Value> = blocks.into_iter().map(|text| json!({"type": "text", "text": text})).collect();
@@ -470,12 +477,14 @@ fn main() {
     let app = Arc::new(Mutex::new(App { engine: index::Engine::default(), graphs: graph::Graphs::default(), last_used: Instant::now() }));
     spawn_idle_release(app.clone());
     if let Some(address) = std::env::var("CONTEXT_BROKER_HTTP_ADDR").ok().filter(|v| !v.trim().is_empty()) {
+        update::spawn(true);
         if let Err(error) = serve_http(app, address.trim()) {
             eprintln!("[broker] {error}");
             std::process::exit(1);
         }
         return;
     }
+    update::spawn(false);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout().lock();
     for line in stdin.lock().lines() {

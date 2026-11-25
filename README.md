@@ -331,6 +331,24 @@ context-broker-rs
 
 ---
 
+## 🔄 Updates
+
+Once a day the broker asks GitHub whether a newer release exists. `CONTEXT_BROKER_UPDATE` chooses what happens then:
+
+| Value | What it does |
+|-------|--------------|
+| `notify` (default) | Says so once a day: a line on stderr, and for a local agent one extra line on a tool reply, which the agent passes on to you. |
+| `auto` | Also installs the release: downloads the binary for your platform, checks it against the published SHA-256, test-runs it, keeps the old binary next to it as `<name>.bak` and swaps the new one in. The new version runs from the next start; the note tells you it was installed. |
+| `off` | Never asks. No request is made. |
+
+- The check runs in the background and never delays a reply. Offline, it stays quiet and looks again later.
+- `auto` replaces the binary it was started from, so the broker needs write access to that folder. Where it has none (a service locked down with `ProtectSystem`, a Nix store path, a binary owned by root), nothing is installed and the note says why. A server over HTTP reports to its log only; restart the service after an update.
+- Release binaries exist for Linux x86-64 and ARM64 (static) and for macOS on Apple silicon. A binary you built yourself is replaced by the release binary in `auto` mode.
+- The checksum is published with the release, so it catches a damaged download, not a release that was tampered with at the source.
+- What was last seen and said is kept in `update.json` in the storage folder.
+
+---
+
 ## ⚙️ Settings
 
 All settings are environment variables. Names are shared with the Python broker where the feature exists in both.
@@ -350,6 +368,7 @@ All settings are environment variables. Names are shared with the Python broker 
 | `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` | none | HTTP mode: your Cloudflare Access team domain, `<team>.cloudflareaccess.com` |
 | `CONTEXT_BROKER_ACCESS_AUD` | none | HTTP mode: the Access application's audience (AUD) tag |
 | `CONTEXT_BROKER_SYNC` | off | HTTP mode: `1` enables the `/sync` file endpoints used by the Obsidian plugin |
+| `CONTEXT_BROKER_UPDATE` | `notify` | `notify` says when a newer release exists, `auto` also installs it, `off` never asks (see [Updates](#-updates)) |
 | `CONTEXT_BROKER_STORAGE` | `json` | Store for chat memory and saved results: `json`, `obsidian`, `graphify` or `auto` |
 | `CONTEXT_BROKER_STORAGE_DIR` | `~/.context-broker` | Where the `json` store lives |
 | `CONTEXT_BROKER_OBSIDIAN_VAULT` | auto-detect | Obsidian vault folder; setting it selects the `obsidian` store |
@@ -377,7 +396,7 @@ All settings are environment variables. Names are shared with the Python broker 
 
 ## 🔒 Privacy and Security
 
-- **Local only.** The only network access is the one-time model download; nothing is sent anywhere afterwards.
+- **Local only.** Your code, searches and chats never leave the machine. The broker makes two kinds of network request: the one-time model download, and a once-a-day question to GitHub about the latest release (see [Updates](#-updates)). That request carries the broker's version and nothing else; `CONTEXT_BROKER_UPDATE=off` stops it.
 - **Hard-coded secret rules.** `SECRET_FILE_PATTERNS`, `SECRET_KEY_SIGNATURES` and `SECRET_VALUE_SIGNATURES` live in `src/config.rs` and cannot be overridden by configuration or `.gitignore`.
 - **Checked on every read.** The filename check and the content check run when files are collected, indexed, searched and snippeted, so a file that becomes secret-bearing later is dropped at the next change.
 - **Memory is filtered too.** `record_turn` and `record_session` refuse a message containing secret signatures, and history lookups skip exchanges that contain them. Notes and memory docs can be edited outside the broker, so in the Obsidian and Graphify stores messages with secret signatures are also dropped when read.
