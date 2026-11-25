@@ -148,12 +148,18 @@ In Zero Trust, under Access, add a **self-hosted** application:
   enabled, the login page lists every identity provider on the account.
 - **Managed OAuth:** turn it on (Advanced settings). Under dynamic client registration, allow the
   redirect addresses of the clients you will use:
-  - `https://claude.ai/api/mcp/auth_callback` for the Claude apps
-  - the ChatGPT connector callback address shown when you add the connector there
-  - `obsidian://context-broker-sync` for the Obsidian plugin in this repository
 
-  Other apps, an address that is refused, and apps that ask for a client ID and secret:
-  [OAUTH-CLIENTS.md](OAUTH-CLIENTS.md).
+  | App | Redirect addresses to allow |
+  |---|---|
+  | Claude (web, desktop, mobile) | `https://claude.ai/api/mcp/auth_callback`<br>`https://claude.com/api/mcp/auth_callback` |
+  | ChatGPT | `https://chatgpt.com/connector_platform_oauth_redirect`<br>`https://chatgpt.com/connector/oauth/*` |
+  | Google Gemini (custom MCP connector) | `https://oauth-redirect.googleusercontent.com/r/user_bound_custom-mcp-<id>`, with the `<id>` of your connector; or `https://oauth-redirect.googleusercontent.com/r/*` to allow any Google connector |
+  | Obsidian plugin in this repository | `obsidian://context-broker-sync` |
+  | Claude Code, Codex and other local clients | turn on **Allow any on localhost** and **Allow any on loopback** |
+
+  Addresses must match exactly; only `https://` addresses ending in `/*` match everything below
+  them. For an address that is refused, and for apps that ask for a client ID and secret (Gemini
+  does when registration fails), see [OAUTH-CLIENTS.md](OAUTH-CLIENTS.md).
 
 Then give the broker the application's details (`<team>.cloudflareaccess.com` and the audience tag
 from the application's overview) through `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` and
