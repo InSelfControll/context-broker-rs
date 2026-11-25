@@ -53,7 +53,3 @@ Both accept an id, a label, part of a label or a short question. If the reply sa
 
 Use it for "what calls this", "what depends on this" and "how does A reach B". Those are questions search answers poorly.
 
-## `route_task`
-
-Give it the task in a sentence and it names the tools that fit. It only matches words against tool descriptions, so use it when you are unsure, not as a required first step.
-

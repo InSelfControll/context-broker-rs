@@ -18,8 +18,8 @@ An MCP server for search and memory in one project. Replies are short plain text
 | Was this problem handled before? | `lookup_project_history` |
 | Find an earlier message by a word or two | `load_cross_session_context` |
 | Reopen one session by id | `load_chat_context` |
-| Save a chat or a decision | `record_session`, `record_turn` |
-| Keep and reuse a search reply | `save_search_results`, `list_saved_results`, `load_saved_results` |
+| Save a chat or a decision | `record_session` |
+| Keep and reuse a search reply | `save_search_results`, `load_saved_results` (no `filename` lists them) |
 | Copy stored history to Obsidian or Graphify | `export_memory` |
 
 ## Rules
