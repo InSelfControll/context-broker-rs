@@ -19,8 +19,7 @@ If you do not know the session id, find it with `load_cross_session_context` fir
 
 Record when the user asks you to save, remember or log the conversation, or when a decision was made that someone will need later (why an approach was chosen, what a tricky bug turned out to be, how something is deployed). Do not record after every reply: it fills the memory with noise and makes later lookups worse.
 
-- `record_turn`: one exchange. `session_id`, `user_message`, `assistant_message`.
-- `record_session`: a whole conversation in one call. `session_id` and `turns`, a list of `{"user": "...", "assistant": "..."}` objects.
+Use `record_session`: `session_id` and `turns`, a list of `{"user": "...", "assistant": "..."}` objects. One exchange is a list with one item; a whole conversation goes in one call.
 
 How to write a good record:
 
@@ -54,7 +53,7 @@ Example:
 
 The user's configuration decides: a JSON store on the machine (the default), notes in an Obsidian vault, or Graphify memory docs. The tools and their replies are the same for all three, so you do not choose.
 
-When the store is Obsidian, `record_turn` and `record_session` write the note directly. One session is one note, under `AI Chats/Chats/Context Broker/` when the vault has an `AI Chats` folder, else under `Context Broker/`.
+When the store is Obsidian, `record_session` writes the note directly. One session is one note, under `AI Chats/Chats/Context Broker/` when the vault has an `AI Chats` folder, else under `Context Broker/`.
 
 ## "Push this chat to Obsidian"
 
@@ -80,8 +79,7 @@ Then stop. Calling `export_memory` again adds nothing, because anything already 
 Use these when a search reply is worth keeping: a map of where a feature lives, the files a long task will keep returning to.
 
 - `save_search_results`: runs a semantic search (`query`, optional `top_k`) and stores the reply under `filename`. Pass a short plain name such as `auth-flow`; the extension is added for you.
-- `list_saved_results`: the names saved for this project.
-- `load_saved_results`: the original query on the first line, then the saved reply. Pass the same `filename`.
+- `load_saved_results`: the original query on the first line, then the saved reply. Pass the same `filename`, or leave `filename` out to list the names saved for this project.
 
 A saved result is a snapshot. Line numbers in it go stale as the code changes, so search again when it is old.
 
