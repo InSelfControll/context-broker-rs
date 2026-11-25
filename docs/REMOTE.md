@@ -152,6 +152,9 @@ In Zero Trust, under Access, add a **self-hosted** application:
   - the ChatGPT connector callback address shown when you add the connector there
   - `obsidian://context-broker-sync` for the Obsidian plugin in this repository
 
+  Other apps, an address that is refused, and apps that ask for a client ID and secret:
+  [OAUTH-CLIENTS.md](OAUTH-CLIENTS.md).
+
 Then give the broker the application's details (`<team>.cloudflareaccess.com` and the audience tag
 from the application's overview) through `CONTEXT_BROKER_ACCESS_TEAM_DOMAIN` and
 `CONTEXT_BROKER_ACCESS_AUD`, and list the same trusted addresses in
@@ -225,6 +228,9 @@ That path is plain HTTP; use it only on a network you trust.
 
 The apps connect from their provider's servers, not from your device, so they always go through
 the sign-in: the first use opens the Access login.
+
+If an app reports that automatic registration failed and asks for a client ID and client secret,
+see [OAUTH-CLIENTS.md](OAUTH-CLIENTS.md#2-make-a-client-id-and-client-secret).
 
 ## 7. Keep the server's copy of the vault in step
 
