@@ -1,5 +1,7 @@
 # `record_turn`
 
+> No longer in the tool list: `record_session` with one turn does the same. The server still answers it for clients that call it by name.
+
 Appends one user/assistant exchange to a session in the local chat ledger. Call it only when the user asks to save or for a decision worth keeping, not after every response. Messages that contain secret signatures are rejected and nothing is saved; empty messages are skipped.
 
 ## Parameters

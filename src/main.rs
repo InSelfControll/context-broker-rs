@@ -34,45 +34,46 @@ struct App {
 }
 
 /// `(name, description, properties, required)` — kept short: every session pays for this list.
+/// `project_root` is explained once, on the first tool. Defaults are applied by the server and
+/// not repeated in the schemas.
 type Tool = (&'static str, &'static str, Value, &'static [&'static str]);
 
+/// The tools a client is told about. `route_task`, `record_turn` and `list_saved_results` are
+/// still answered by `call` for clients that know them, but are no longer listed: the listed
+/// tools cover what they do.
 fn tools() -> Vec<Tool> {
-    let root = || json!({"type": "string", "description": "Project root; auto-detected if omitted"});
     let text = || json!({"type": "string"});
+    let int = || json!({"type": "integer"});
+    let flag = || json!({"type": "boolean"});
     let mut list: Vec<Tool> = vec![
-        ("search_context", "Semantic code search. Returns the best-matching lines of the top files as plain text with relative paths and @L line markers. Omit query for a project overview.",
-            json!({"query": text(), "project_root": root(), "top_k": {"type": "integer", "default": 5}}), &[]),
-        ("find_in_codebase", "Exact literal or regex search; returns file, line and snippet. Use for a known symbol or string.",
-            json!({"pattern": text(), "project_root": root(), "case_sensitive": {"type": "boolean", "default": false},
-                   "use_regex": {"type": "boolean", "default": false}, "file_glob": text()}), &["pattern"]),
-        ("route_task", "Suggest which of this server's tools fit a task.",
-            json!({"task": text(), "top_k": {"type": "integer", "default": 3}}), &["task"]),
-        ("record_turn", "Append one (user, assistant) exchange to a session. Call only when the user asks to save or for a decision worth keeping; do NOT call after every response.",
-            json!({"session_id": text(), "user_message": text(), "assistant_message": text(), "project_root": root()}), &["session_id"]),
-        ("record_session", "Append a whole conversation to a session in one call. Summarize long replies instead of repeating them.",
-            json!({"session_id": text(), "project_root": root(),
+        ("search_context", "Semantic code search: best-matching lines of the top files, with @L line markers. Omit query for a project overview. project_root is optional on every tool (auto-detected).",
+            json!({"query": text(), "top_k": int(), "project_root": text()}), &[]),
+        ("find_in_codebase", "Exact literal or regex search for a known symbol or string.",
+            json!({"pattern": text(), "use_regex": flag(), "case_sensitive": flag(), "file_glob": text(), "project_root": text()}), &["pattern"]),
+        ("record_session", "Save exchanges to a session. Only when the user asks or a decision is worth keeping, not after every reply. Summarize long replies.",
+            json!({"session_id": text(), "project_root": text(),
                    "turns": {"type": "array", "items": {"type": "object", "properties": {"user": text(), "assistant": text()}}}}), &["session_id", "turns"]),
-        ("load_chat_context", "Load a stored session (newest messages last).",
-            json!({"session_id": text(), "project_root": root(), "search_query": text(), "limit": {"type": "integer", "default": 20}}), &["session_id"]),
-        ("load_cross_session_context", "Find stored messages containing search_query across all sessions of the project.",
-            json!({"search_query": text(), "project_root": root(), "top_k": {"type": "integer", "default": 10}}), &["search_query"]),
-        ("lookup_project_history", "Check whether this issue was handled before; returns up to three past exchanges.",
-            json!({"query": text(), "project_root": root()}), &["query"]),
-        ("save_search_results", "Run a semantic search and save the result under a name.",
-            json!({"query": text(), "filename": text(), "project_root": root(), "top_k": {"type": "integer", "default": 5}}), &["query", "filename"]),
-        ("list_saved_results", "List saved search results for the project.", json!({"project_root": root()}), &[]),
-        ("load_saved_results", "Load a saved search result.", json!({"filename": text(), "project_root": root()}), &["filename"]),
-        ("export_memory", "Copy the stored chat history and saved results into Obsidian or Graphify (auto-detected when target is omitted). Call only when the user asks; repeating it adds nothing.",
-            json!({"target": {"type": "string", "enum": ["obsidian", "graphify"]}, "all_projects": {"type": "boolean", "default": false}, "project_root": root()}), &[]),
+        ("load_chat_context", "Load a stored session.",
+            json!({"session_id": text(), "search_query": text(), "limit": int(), "project_root": text()}), &["session_id"]),
+        ("load_cross_session_context", "Find stored messages containing search_query in all sessions.",
+            json!({"search_query": text(), "top_k": int(), "project_root": text()}), &["search_query"]),
+        ("lookup_project_history", "Was this issue handled before? Up to three past exchanges.",
+            json!({"query": text(), "project_root": text()}), &["query"]),
+        ("save_search_results", "Run a semantic search and save the reply under a name.",
+            json!({"query": text(), "filename": text(), "top_k": int(), "project_root": text()}), &["query", "filename"]),
+        ("load_saved_results", "Load a saved search result. Omit filename to list them.",
+            json!({"filename": text(), "project_root": text()}), &[]),
+        ("export_memory", "Copy stored history and saved results into Obsidian or Graphify. Only when the user asks; repeating adds nothing.",
+            json!({"target": {"type": "string", "enum": ["obsidian", "graphify"]}, "all_projects": flag(), "project_root": text()}), &[]),
     ];
     if REMOTE.get().is_some() {
         // Remote clients have no file access of their own; local agents read files themselves.
-        list.push(("read_file", "Read a file of the project by relative path (as given in search results). Returns numbered lines.",
-            json!({"path": text(), "start_line": {"type": "integer", "default": 1}, "max_lines": {"type": "integer", "default": 200}, "project_root": root()}), &["path"]));
+        list.push(("read_file", "Numbered lines of a project file, by the relative path search results give.",
+            json!({"path": text(), "start_line": int(), "max_lines": int(), "project_root": text()}), &["path"]));
     }
     if graph_tool_listed() {
-        list.push(("query_graph", "Graphify knowledge graph: a node's connections, or with `to` the shortest path between two nodes. Use for callers, dependencies and how things connect.",
-            json!({"node": text(), "to": text(), "project_root": root(), "limit": {"type": "integer", "default": 20}}), &["node"]));
+        list.push(("query_graph", "Graphify graph: a node's connections (callers, dependencies), or with `to` the shortest path between two nodes.",
+            json!({"node": text(), "to": text(), "limit": int(), "project_root": text()}), &["node"]));
     }
     list
 }
@@ -121,8 +122,11 @@ fn tool_list() -> Value {
     let list: Vec<Value> = tools()
         .into_iter()
         .map(|(name, description, properties, required)| {
-            json!({"name": name, "description": description,
-                   "inputSchema": {"type": "object", "properties": properties, "required": required}})
+            let mut schema = json!({"type": "object", "properties": properties});
+            if !required.is_empty() {
+                schema["required"] = json!(required);
+            }
+            json!({"name": name, "description": description, "inputSchema": schema})
         })
         .collect();
     json!({"tools": list})
@@ -214,7 +218,10 @@ fn call(app: &mut App, name: &str, args: &Value) -> Result<Vec<String>, String> 
         "load_cross_session_context" => memory::cross_session(&root, arg(args, "search_query"), arg_usize(args, "top_k", 10))?,
         "lookup_project_history" => memory::history_lookup(&root, arg(args, "query"), &mut |texts| app.engine.embed(texts)),
         "list_saved_results" => memory::list_results(&root)?,
-        "load_saved_results" => memory::load_results(&root, arg(args, "filename"))?,
+        "load_saved_results" => match arg(args, "filename") {
+            "" => memory::list_results(&root)?,
+            filename => memory::load_results(&root, filename)?,
+        },
         "read_file" => read_file(&root, arg(args, "path"), arg_usize(args, "start_line", 1), arg_usize(args, "max_lines", 200))?,
         "export_memory" => {
             let all_projects = args.get("all_projects").and_then(Value::as_bool).unwrap_or(false);
