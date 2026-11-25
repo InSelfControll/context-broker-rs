@@ -35,6 +35,8 @@ impl Server {
             // Nothing installed on the test machine may be detected: no Obsidian settings, empty PATH.
             .env("CONTEXT_BROKER_OBSIDIAN_CONFIG", storage.join("no-obsidian.json"))
             .env("PATH", storage)
+            // Tests never ask the network whether a release exists, unless one sets this itself.
+            .env("CONTEXT_BROKER_UPDATE", "off")
             .envs(settings.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -273,7 +275,61 @@ fn full_mcp_session() {
     remote_http(&base, &root, &storage, &log);
     access_sign_in(&base, &root, &storage, &log);
     file_sync(&base, &storage, &log);
+    update_notice(&base, &log);
     let _ = std::fs::remove_dir_all(base);
+}
+
+/// A newer release is announced once on a tool reply, and the question is asked once a day.
+fn update_notice(base: &Path, log: &Path) {
+    use std::io::Read;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // A stand-in for the release address, counting how often it is asked.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/latest", listener.local_addr().unwrap());
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counter = asked.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = stream.read(&mut [0u8; 2048]);
+            counter.fetch_add(1, Ordering::SeqCst);
+            let body = r#"{"tag_name":"v999.0.0"}"#;
+            let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        }
+    });
+
+    let storage = base.join("update-store");
+    let settings = [("CONTEXT_BROKER_UPDATE", Path::new("notify")), ("CONTEXT_BROKER_UPDATE_URL", Path::new(&url))];
+    let list = |server: &mut Server| server.call("load_saved_results", json!({})).0;
+
+    let mut server = Server::start_with(&storage, log, &settings);
+    server.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
+    // The check runs in the background; the first reply after it finishes carries the note.
+    let mut blocks = list(&mut server);
+    for _ in 0..100 {
+        if blocks.len() > 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        blocks = list(&mut server);
+    }
+    assert_eq!(blocks.len(), 2, "{blocks:?}");
+    assert_eq!(blocks[0], "No saved results.");
+    assert!(blocks[1].starts_with("[context-broker] Version 999.0.0 is available") && blocks[1].ends_with("Please tell the user."), "{}", blocks[1]);
+    assert_eq!(list(&mut server).len(), 1, "said once");
+    server.shutdown();
+
+    // A new process the same day neither asks again nor repeats the note.
+    let mut server = Server::start_with(&storage, log, &settings);
+    server.rpc("initialize", json!({"protocolVersion": "2025-06-18"}));
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(list(&mut server).len(), 1);
+    server.shutdown();
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+    let state: Value = serde_json::from_str(&std::fs::read_to_string(storage.join("update.json")).unwrap()).unwrap();
+    assert_eq!((state["latest"].as_str(), state["notified"].as_str()), (Some("v999.0.0"), Some("999.0.0")));
 }
 
 /// Chat memory and saved results as notes in an Obsidian vault.

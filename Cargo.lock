@@ -294,6 +294,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
+ "flate2",
  "globset",
  "ignore",
  "jsonwebtoken",

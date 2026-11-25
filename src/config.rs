@@ -163,7 +163,7 @@ pub fn network_contains(network: &Network, client: std::net::IpAddr) -> bool {
     }
 }
 
-fn env_text(name: &str) -> Option<String> {
+pub fn env_text(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.trim().is_empty())
 }
 /// True when notes follow the vault's existing AI-chat convention (`AI Chats/Chats/<platform>/`,
