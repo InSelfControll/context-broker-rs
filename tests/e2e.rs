@@ -626,6 +626,27 @@ fn remote_http(base: &Path, root: &Path, storage: &Path, log: &Path) {
 
     assert_eq!(rpc("initialize", json!({"protocolVersion": "2025-06-18"}))["result"]["serverInfo"]["name"], "context-broker");
     assert_eq!(http("POST", "/mcp", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#).0, 202);
+
+    // Sessions: initialize hands out this process's id. A client holding the id of an earlier
+    // process gets 404, the signal to connect again and re-read the tool list; a client that
+    // sends no id at all is still served.
+    let with_session = |session: Option<&str>, method: &str| -> (u16, String) {
+        let body = json!({"jsonrpc": "2.0", "id": 8, "method": method, "params": {"protocolVersion": "2025-06-18"}}).to_string();
+        let extra = session.map(|id| format!("Mcp-Session-Id: {id}\r\n")).unwrap_or_default();
+        let mut stream = std::net::TcpStream::connect(&address).unwrap();
+        write!(stream, "POST /mcp HTTP/1.1\r\nHost: {address}\r\n{extra}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        let head = reply.split_once("\r\n\r\n").unwrap().0.to_string();
+        (head.split_whitespace().nth(1).unwrap().parse().unwrap(), head)
+    };
+    let (status, head) = with_session(None, "initialize");
+    let session = head.lines().find_map(|line| line.to_lowercase().strip_prefix("mcp-session-id: ").map(str::to_string)).expect("initialize names the session");
+    assert_eq!((status, session.len()), (200, 32));
+    assert_eq!(with_session(Some(&session), "tools/list").0, 200);
+    assert_eq!(with_session(Some("id-of-an-earlier-process"), "tools/list").0, 404);
+    assert_eq!(with_session(Some("id-of-an-earlier-process"), "initialize").0, 200, "connecting again is always allowed");
+    assert_eq!(with_session(None, "tools/list").0, 200);
     assert_eq!((http("GET", "/mcp", "").0, http("POST", "/elsewhere", "{}").0), (405, 404));
     let listing = rpc("tools/list", json!({}));
     let names: Vec<&str> = listing["result"]["tools"].as_array().unwrap().iter().map(|tool| tool["name"].as_str().unwrap()).collect();

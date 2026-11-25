@@ -81,6 +81,23 @@ fn tools() -> Vec<Tool> {
 
 /// Set when the server speaks HTTP to remote clients.
 static REMOTE: OnceLock<()> = OnceLock::new();
+
+/// The session id this process hands out over HTTP. It changes at every start, so a client that
+/// still holds the id of an earlier process is told its session is gone (404) and connects
+/// afresh, which is when clients read the tool list again. It identifies the process, not the
+/// caller: who may call is decided by the address list and Access, never by this id.
+fn session_id() -> &'static str {
+    static ID: OnceLock<String> = OnceLock::new();
+    ID.get_or_init(|| {
+        let mut seed = [0u8; 16];
+        let random = std::fs::File::open("/dev/urandom").and_then(|mut source| source.read_exact(&mut seed));
+        if random.is_err() {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
+            seed = (now ^ ((std::process::id() as u128) << 64)).to_le_bytes();
+        }
+        seed.iter().map(|byte| format!("{byte:02x}")).collect()
+    })
+}
 const MAX_REQUEST_BYTES: u64 = 1_000_000;
 const MAX_READ_CHARS: usize = 400_000;
 const MAX_READ_REPLY_CHARS: usize = 12_000;
@@ -455,12 +472,37 @@ fn serve(app: &Mutex<App>, server: &tiny_http::Server, allowed: &[config::Networ
             plain(405, "use POST").with_header(tiny_http::Header::from_bytes("Allow", "POST").expect("valid header"))
         } else {
             let mut body = String::new();
+            let stale = header("Mcp-Session-Id").filter(|id| id != session_id());
             match request.as_reader().take(MAX_REQUEST_BYTES).read_to_string(&mut body) {
                 Err(_) => plain(400, "unreadable request body"),
-                Ok(_) => match respond(app, &body) {
-                    Some(reply) => plain(200, &reply.to_string()).with_header(json_type.clone()),
-                    None => plain(202, ""),
-                },
+                Ok(_) => {
+                    let message = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
+                    let method = message.get("method").and_then(Value::as_str).unwrap_or("");
+                    // A session of an earlier process: the client must initialize again (MCP
+                    // Streamable HTTP), and so picks up the current tool list.
+                    if stale.is_some() && method != "initialize" {
+                        eprintln!("[broker] a client held a session from before the restart; asked it to connect again");
+                        let _ = request.respond(plain(404, "session not found: the server restarted, initialize again"));
+                        continue;
+                    }
+                    let reply = respond(app, &body);
+                    match (method, reply) {
+                        ("initialize", Some(reply)) => {
+                            let client = &message["params"]["clientInfo"];
+                            eprintln!("[broker] client connected: {} {}", client["name"].as_str().unwrap_or("unnamed"), client["version"].as_str().unwrap_or(""));
+                            plain(200, &reply.to_string())
+                                .with_header(json_type.clone())
+                                .with_header(tiny_http::Header::from_bytes("Mcp-Session-Id", session_id()).expect("valid header"))
+                        }
+                        (_, Some(reply)) => {
+                            if method == "tools/list" {
+                                eprintln!("[broker] tool list sent");
+                            }
+                            plain(200, &reply.to_string()).with_header(json_type.clone())
+                        }
+                        (_, None) => plain(202, ""),
+                    }
+                }
             }
         };
         let _ = request.respond(response);
